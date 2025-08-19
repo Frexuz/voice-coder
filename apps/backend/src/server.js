@@ -2,35 +2,108 @@ import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
 import cors from "cors";
+import { runCommandPerRequest, describeConfig } from "./runner.js";
+const DEBUG =
+  String(process.env.VC_DEBUG || "").toLowerCase() === "true" ||
+  process.env.VC_DEBUG === "1";
+const dbg = (...args) => {
+  if (DEBUG) console.log("[vc-debug]", ...args);
+};
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.post("/api/prompt", (req, res) => {
+app.post("/api/prompt", async (req, res) => {
   const { id, text } = req.body || {};
   if (!text) return res.status(400).json({ error: "missing text" });
-  const reply = `you said '${text}'`;
-  res.json({ id, text: reply });
+
+  try {
+    dbg("http: prompt", { id, textPreview: String(text).slice(0, 120) });
+    const result = await runCommandPerRequest(text);
+    if (result.ok) {
+      dbg("http: ok", { id, bytes: result.text?.length || 0 });
+      return res.json({ id, text: result.text });
+    }
+    const status = result.status || 500;
+    dbg("http: error", {
+      id,
+      status,
+      error: result.error,
+      message: result.message,
+    });
+    return res.status(status).json({
+      id,
+      error: result.error || "command_failed",
+      message: result.message || "Command failed.",
+      preview: result.preview,
+    });
+  } catch (err) {
+    dbg("http: exception", err?.message || err);
+    return res
+      .status(500)
+      .json({ error: "server_error", message: "Unexpected error." });
+  }
 });
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on("connection", (ws) => {
-  ws.on("message", (data) => {
+  ws.on("message", async (data) => {
+    let msg;
     try {
-      const msg = JSON.parse(data.toString());
+      msg = JSON.parse(data.toString());
+    } catch (err) {
+      dbg("ws: invalid json", err?.message || String(err));
+      ws.send(JSON.stringify({ type: "error", message: "invalid json" }));
+      return;
+    }
+    try {
       if (msg.type === "prompt") {
-        const reply = `you said '${msg.text}'`;
+        dbg("ws: prompt", {
+          id: msg.id,
+          textPreview: String(msg.text).slice(0, 120),
+        });
         ws.send(JSON.stringify({ type: "ack", id: msg.id }));
-        // small delay to simulate processing
-        setTimeout(() => {
-          ws.send(JSON.stringify({ type: "reply", id: msg.id, text: reply }));
-        }, 100);
+        try {
+          const result = await runCommandPerRequest(msg.text);
+          if (result.ok) {
+            dbg("ws: ok", { id: msg.id, bytes: result.text?.length || 0 });
+            ws.send(
+              JSON.stringify({ type: "reply", id: msg.id, text: result.text })
+            );
+          } else {
+            dbg("ws: error", {
+              id: msg.id,
+              error: result.error,
+              status: result.status,
+              message: result.message,
+            });
+            ws.send(
+              JSON.stringify({
+                type: "error",
+                id: msg.id,
+                error: result.error || "command_failed",
+                message: result.message || "Command failed.",
+                preview: result.preview,
+              })
+            );
+          }
+        } catch (err) {
+          dbg("ws: exception", err?.message || err);
+          ws.send(
+            JSON.stringify({
+              type: "error",
+              id: msg.id,
+              error: "server_error",
+              message: "Unexpected error.",
+            })
+          );
+        }
       }
     } catch (err) {
-      ws.send(JSON.stringify({ type: "error", message: "invalid json" }));
+      dbg("ws: handler exception", err?.message || String(err));
     }
   });
 });
@@ -50,7 +123,10 @@ server.on("upgrade", (req, socket, head) => {
   }
 });
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 4001;
 server.listen(PORT, () => {
-  console.log(`backend listening on http://localhost:${PORT}`);
+  const cfg = describeConfig();
+  console.log(
+    `backend listening on http://localhost:${PORT} (cmd: ${cfg.CMD} ${cfg.ARGS.join(" ") || "<none>"}, timeout: ${cfg.TIMEOUT_MS}ms)`
+  );
 });

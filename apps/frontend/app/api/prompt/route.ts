@@ -11,7 +11,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "missing text" }, { status: 400 });
     }
 
-    const base = process.env.BACKEND_HTTP_URL || "http://localhost:4000";
+    const base = process.env.BACKEND_HTTP_URL || "http://localhost:4001";
     const res = await fetch(`${base}/api/prompt`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

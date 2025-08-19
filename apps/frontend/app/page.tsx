@@ -15,7 +15,7 @@ function getWSUrl() {
   const host = window.location.hostname;
   const isSecure = window.location.protocol === "https:";
   const proto = isSecure ? "wss" : "ws";
-  return `${proto}://${host}:4000/ws`;
+  return `${proto}://${host}:4001/ws`;
 }
 
 export default function Home() {
@@ -25,6 +25,7 @@ export default function Home() {
   const didInitRef = useRef(false);
   const [supportsSpeech, setSupportsSpeech] = useState<boolean>(false);
   const recognitionRef = useRef<any>(null);
+  const gotSpeechRef = useRef<boolean>(false);
   const idRef = useRef<string>("");
   const [messages, setMessages] = useState<
     { id: string; role: "user" | "assistant"; text: string }[]
@@ -87,6 +88,19 @@ export default function Home() {
               ]);
             } else if (msg.type === "error") {
               setStatus("error");
+              const text =
+                msg.message ||
+                (typeof msg.error === "string"
+                  ? `Error: ${msg.error}`
+                  : "Error");
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: msg.id || Math.random().toString(36).slice(2),
+                  role: "assistant",
+                  text,
+                },
+              ]);
             }
           } catch {
             // ignore malformed messages
@@ -143,11 +157,28 @@ export default function Home() {
     recognition.lang = "en-US";
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
+    gotSpeechRef.current = false;
     recognition.onresult = (event: any) => {
-      const text = event.results[0][0].transcript;
-      sendPrompt(text);
+      try {
+        const text = event.results?.[0]?.[0]?.transcript || "";
+        if (text.trim()) {
+          gotSpeechRef.current = true;
+          sendPrompt(text);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    recognition.onnomatch = () => {
+      // No speech recognized
     };
     recognition.onerror = () => setStatus("error");
+    recognition.onend = () => {
+      // If user released without speaking, return to idle
+      if (!gotSpeechRef.current) {
+        setStatus("idle");
+      }
+    };
     recognitionRef.current = recognition;
     recognition.start();
   };
@@ -155,7 +186,6 @@ export default function Home() {
   const handleMicUp = () => {
     if (recognitionRef.current) {
       recognitionRef.current.stop();
-      setStatus("sending");
     }
   };
 
@@ -185,18 +215,39 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
-        const data = await res.json();
-        setStatus("done");
+        const data = await res.json().catch(() => ({}) as any);
+        if (res.ok && data?.text) {
+          setStatus("done");
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: Math.random().toString(36).slice(2),
+              role: "assistant",
+              text: data.text,
+            },
+          ]);
+        } else {
+          setStatus("error");
+          const text = data?.message || data?.error || "Request failed";
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: Math.random().toString(36).slice(2),
+              role: "assistant",
+              text: String(text),
+            },
+          ]);
+        }
+      } catch (e: any) {
+        setStatus("error");
         setMessages((prev) => [
           ...prev,
           {
             id: Math.random().toString(36).slice(2),
             role: "assistant",
-            text: data.text,
+            text: e?.message || "Network error",
           },
         ]);
-      } catch {
-        setStatus("error");
       }
     }
   };

@@ -2,7 +2,7 @@
   "name": "frontend",
   "private": true,
   "scripts": {
-  "dev": "bun run next dev",
+  "dev": "bun run next dev --port 3003",
   "build": "bun run next build",
   "start": "bun run next start",
   "server": "bun run next dev"

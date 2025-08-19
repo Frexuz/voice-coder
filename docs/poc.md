@@ -114,7 +114,7 @@ Goal: Press-to-talk in the browser → transcribe speech → send text to backen
      npm install
      npm start
 
-     (listens on http://localhost:4000)
+     (listens on http://localhost:4001)
 
    - Frontend:
 
@@ -128,4 +128,4 @@ Goal: Press-to-talk in the browser → transcribe speech → send text to backen
 
 Notes:
 - If the browser's Web Speech API is unavailable, use the text input fallback.
-- The frontend will attempt a WebSocket to port 4000; if it fails, it falls back to POST /api/prompt.
+- The frontend will attempt a WebSocket to port 4001; if it fails, it falls back to POST /api/prompt.
