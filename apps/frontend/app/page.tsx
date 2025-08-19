@@ -3,6 +3,9 @@
 "use client";
 
 import { useRef, useState, useEffect } from "react";
+import { Terminal } from "xterm";
+import { FitAddon } from "xterm-addon-fit";
+import "xterm/css/xterm.css";
 import { Mic, Send } from "lucide-react";
 
 type Status = "idle" | "listening" | "sending" | "waiting" | "done" | "error";
@@ -47,6 +50,10 @@ export default function Home() {
   const [ptyRunning, setPtyRunning] = useState<boolean>(false);
   const [ptyOutput, setPtyOutput] = useState<string>("");
   const ptyRef = useRef<HTMLDivElement | null>(null);
+  const xtermRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const lastWrittenIndexRef = useRef<number>(0);
+  const initialBufferRef = useRef<string>("");
   // If Start is clicked while WS is (re)connecting, queue it
   const pendingStartRef = useRef<boolean>(false);
   // Debug: WS status + last event
@@ -66,7 +73,7 @@ export default function Home() {
     let alive = true;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const connect = () => {
+    const connect = () => {
       if (!alive) return;
       const url = getWSUrl();
       try {
@@ -82,7 +89,7 @@ export default function Home() {
         // eslint-disable-next-line no-console
         console.log("[vc-fe] ws: connecting", url);
         setWsStatus("connecting");
-  const socket = new WebSocket(url);
+        const socket = new WebSocket(url);
         wsRef.current = socket;
 
         socket.onopen = () => {
@@ -184,23 +191,23 @@ export default function Home() {
       }
     };
 
-  // expose connect for manual triggers
-  connectRef.current = connect;
+    // expose connect for manual triggers
+    connectRef.current = connect;
 
-  connect();
+    connect();
 
     return () => {
       alive = false;
       clearTimeout(reconnectTimer);
-    // Avoid closing while CONNECTING to prevent noisy console errors in dev
+      // Avoid closing while CONNECTING to prevent noisy console errors in dev
       try {
         const s = wsRef.current;
         if (s && s.readyState === WebSocket.OPEN) {
           s.close(1000, "unmount");
         }
       } catch {}
-  wsRef.current = null;
-  connectRef.current = null;
+      wsRef.current = null;
+      connectRef.current = null;
     };
   }, []);
 
@@ -214,13 +221,77 @@ export default function Home() {
     }
   }, [messages]);
 
-  // Auto-scroll PTY output to bottom
-  // Scroll PTY on new output
-  const lastOutLenRef = useRef(0);
+  // Keep a ref of current buffer for initial mount of xterm
   useEffect(() => {
-    if (ptyOutput.length !== lastOutLenRef.current) {
-      ptyRef.current?.scrollTo({ top: ptyRef.current.scrollHeight });
-      lastOutLenRef.current = ptyOutput.length;
+    initialBufferRef.current = ptyOutput;
+  }, [ptyOutput]);
+
+  // xterm.js PTY output rendering + responsive fit
+  useEffect(() => {
+    if (!showPty) return;
+    if (!ptyRef.current) return;
+    if (!xtermRef.current) {
+      const term = new Terminal({
+        fontSize: 13,
+        theme: { background: "#111", foreground: "#b6fcd5" },
+        cursorBlink: false,
+        disableStdin: true,
+        scrollback: 1000,
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(ptyRef.current);
+      try {
+        fit.fit();
+      } catch {}
+      xtermRef.current = term;
+      fitRef.current = fit;
+      // Write any existing buffer (use ref to avoid hook deps)
+      const initBuf = initialBufferRef.current;
+      if (initBuf) {
+        term.write(initBuf);
+        lastWrittenIndexRef.current = initBuf.length;
+      }
+      // Observe container resize to refit terminal
+      const ro = new ResizeObserver(() => {
+        try {
+          fitRef.current?.fit();
+        } catch {}
+      });
+      ro.observe(ptyRef.current);
+      const onResize = () => {
+        try {
+          fitRef.current?.fit();
+        } catch {}
+      };
+      window.addEventListener("resize", onResize);
+      return () => {
+        window.removeEventListener("resize", onResize);
+        try {
+          ro.disconnect();
+        } catch {}
+        xtermRef.current?.dispose();
+        xtermRef.current = null;
+        fitRef.current = null;
+        lastWrittenIndexRef.current = 0;
+      };
+    }
+  }, [showPty]);
+
+  // Append new PTY output to xterm without re-rendering
+  useEffect(() => {
+    const term = xtermRef.current;
+    if (!term) return;
+    const last = lastWrittenIndexRef.current;
+    if (ptyOutput.length > last) {
+      const chunk = ptyOutput.slice(last);
+      term.write(chunk);
+      lastWrittenIndexRef.current = ptyOutput.length;
+    }
+    // If output was cleared (e.g., Clear button), reset terminal
+    if (ptyOutput.length === 0 && last > 0) {
+      term.clear();
+      lastWrittenIndexRef.current = 0;
     }
   }, [ptyOutput]);
 
@@ -383,125 +454,139 @@ export default function Home() {
           )}
           {/* Minimal PTY panel */}
           <div className="mt-3">
-            <div className="flex justify-between items-center bg-white shadow-sm px-3 py-2 border rounded-md">
+            <div className="flex sm:flex-row flex-col sm:justify-between items-start sm:items-center gap-2 bg-white shadow-sm px-3 py-2 border rounded-md">
               <div className="font-medium text-gray-800 text-sm">
                 PTY Session
               </div>
-              <div className="flex items-center gap-2">
-                <span
-                  className={
-                    ptyRunning
-                      ? "text-green-600 text-xs"
-                      : "text-gray-500 text-xs"
-                  }
-                >
-                  {ptyRunning ? "running" : "stopped"}
-                </span>
-                <span className="text-[10px] text-gray-400">
-                  WS: {wsStatus}
-                  {wsLastEvent ? ` • Last: ${wsLastEvent}` : ""}
-                </span>
-                <button
-                  type="button"
-                  className="bg-gray-50 hover:bg-gray-100 px-2 py-1 border rounded text-xs"
-                  onClick={() => setShowPty((v) => !v)}
-                >
-                  {showPty ? "Hide" : "Show"}
-                </button>
-                <button
-                  type="button"
-                  className="bg-gray-50 hover:bg-gray-100 px-2 py-1 border rounded text-xs"
-                  onClick={() => {
-                    // eslint-disable-next-line no-console
-                    console.log("[vc-fe] click: startSession");
-                    const ws = wsRef.current;
-                    // eslint-disable-next-line no-console
-                    console.log("[vc-fe] wsRef", { has: !!ws });
-                    if (!ws) {
-                      // eslint-disable-next-line no-console
-                      console.warn("[vc-fe] startSession: no websocket instance yet");
-                      // Queue and let reconnect/open handler send it
-                      pendingStartRef.current = true;
-                      setWsStatus("connecting");
-                      // Try to (re)connect immediately
-                      connectRef.current?.();
-                      return;
+              <div className="flex sm:flex-row flex-wrap sm:justify-end items-center gap-2 w-full">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={
+                      ptyRunning
+                        ? "text-green-600 text-xs"
+                        : "text-gray-500 text-xs"
                     }
-                    const rs = ws.readyState;
-                    // eslint-disable-next-line no-console
-                    console.log("[vc-fe] ws readyState", rs, "OPEN=", WebSocket.OPEN);
-                    if (rs === WebSocket.OPEN) {
-                      ws.send(
-                        JSON.stringify({ type: "startSession", options: {} })
+                  >
+                    {ptyRunning ? "running" : "stopped"}
+                  </span>
+                  <span className="max-w-[40vw] sm:max-w-[20rem] text-[10px] text-gray-400 truncate">
+                    WS: {wsStatus}
+                    {wsLastEvent ? ` • Last: ${wsLastEvent}` : ""}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 pb-1 overflow-x-auto">
+                  <button
+                    type="button"
+                    className="bg-gray-50 hover:bg-gray-100 px-2 py-1 border rounded text-xs shrink-0"
+                    onClick={() => setShowPty((v) => !v)}
+                  >
+                    {showPty ? "Hide" : "Show"}
+                  </button>
+                  <button
+                    type="button"
+                    className="bg-gray-50 hover:bg-gray-100 disabled:opacity-50 px-2 py-1 border rounded text-xs shrink-0"
+                    disabled={ptyRunning}
+                    onClick={() => {
+                      if (ptyRunning) return;
+                      // eslint-disable-next-line no-console
+                      console.log("[vc-fe] click: startSession");
+                      const ws = wsRef.current;
+                      // eslint-disable-next-line no-console
+                      console.log("[vc-fe] wsRef", { has: !!ws });
+                      if (!ws) {
+                        // eslint-disable-next-line no-console
+                        console.warn(
+                          "[vc-fe] startSession: no websocket instance yet"
+                        );
+                        // Queue and let reconnect/open handler send it
+                        pendingStartRef.current = true;
+                        setWsStatus("connecting");
+                        // Try to (re)connect immediately
+                        connectRef.current?.();
+                        return;
+                      }
+                      const rs = ws.readyState;
+                      // eslint-disable-next-line no-console
+                      console.log(
+                        "[vc-fe] ws readyState",
+                        rs,
+                        "OPEN=",
+                        WebSocket.OPEN
                       );
-                    } else if (rs === WebSocket.CONNECTING) {
-                      // Queue the start; onopen will send it
-                      pendingStartRef.current = true;
-                      setWsStatus("connecting");
-                    } else if (rs === WebSocket.CLOSING || rs === WebSocket.CLOSED) {
-                      // Queue and trigger a reconnect
-                      pendingStartRef.current = true;
-                      setWsStatus("connecting");
-                      connectRef.current?.();
-                    } else {
+                      if (rs === WebSocket.OPEN) {
+                        ws.send(
+                          JSON.stringify({ type: "startSession", options: {} })
+                        );
+                      } else if (rs === WebSocket.CONNECTING) {
+                        // Queue the start; onopen will send it
+                        pendingStartRef.current = true;
+                        setWsStatus("connecting");
+                      } else if (
+                        rs === WebSocket.CLOSING ||
+                        rs === WebSocket.CLOSED
+                      ) {
+                        // Queue and trigger a reconnect
+                        pendingStartRef.current = true;
+                        setWsStatus("connecting");
+                        connectRef.current?.();
+                      } else {
+                        // eslint-disable-next-line no-console
+                        console.warn(
+                          "[vc-fe] startSession: websocket not open",
+                          rs
+                        );
+                        // Queue and rely on auto-reconnect to send on next open
+                        pendingStartRef.current = true;
+                        setWsStatus("connecting");
+                        connectRef.current?.();
+                      }
+                    }}
+                  >
+                    Start
+                  </button>
+                  <button
+                    type="button"
+                    className="bg-gray-50 hover:bg-gray-100 disabled:opacity-50 px-2 py-1 border rounded text-xs shrink-0"
+                    disabled={!ptyRunning}
+                    onClick={() => {
                       // eslint-disable-next-line no-console
-                      console.warn("[vc-fe] startSession: websocket not open", rs);
-                      // Queue and rely on auto-reconnect to send on next open
-                      pendingStartRef.current = true;
-                      setWsStatus("connecting");
-                      connectRef.current?.();
-                    }
-                  }}
-                >
-                  Start
-                </button>
-                <button
-                  type="button"
-                  className="bg-gray-50 hover:bg-gray-100 disabled:opacity-50 px-2 py-1 border rounded text-xs"
-                  disabled={!ptyRunning}
-                  onClick={() => {
-                    // eslint-disable-next-line no-console
-                    console.log("[vc-fe] click: interrupt");
-                    const ws = wsRef.current;
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                      ws.send(JSON.stringify({ type: "interrupt" }));
-                    }
-                  }}
-                >
-                  Interrupt
-                </button>
-                <button
-                  type="button"
-                  className="bg-gray-50 hover:bg-gray-100 disabled:opacity-50 px-2 py-1 border rounded text-xs"
-                  disabled={!ptyRunning}
-                  onClick={() => {
-                    // eslint-disable-next-line no-console
-                    console.log("[vc-fe] click: stop");
-                    const ws = wsRef.current;
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                      ws.send(JSON.stringify({ type: "stop" }));
-                    }
-                  }}
-                >
-                  Stop
-                </button>
-                <button
-                  type="button"
-                  className="bg-gray-50 hover:bg-gray-100 px-2 py-1 border rounded text-xs"
-                  onClick={() => setPtyOutput("")}
-                >
-                  Clear
-                </button>
+                      console.log("[vc-fe] click: interrupt");
+                      const ws = wsRef.current;
+                      if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: "interrupt" }));
+                      }
+                    }}
+                  >
+                    Interrupt
+                  </button>
+                  <button
+                    type="button"
+                    className="bg-gray-50 hover:bg-gray-100 disabled:opacity-50 px-2 py-1 border rounded text-xs shrink-0"
+                    disabled={!ptyRunning}
+                    onClick={() => {
+                      // eslint-disable-next-line no-console
+                      console.log("[vc-fe] click: stop");
+                      const ws = wsRef.current;
+                      if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: "stop" }));
+                      }
+                    }}
+                  >
+                    Stop
+                  </button>
+                  <button
+                    type="button"
+                    className="bg-gray-50 hover:bg-gray-100 px-2 py-1 border rounded text-xs shrink-0"
+                    onClick={() => setPtyOutput("")}
+                  >
+                    Clear
+                  </button>
+                </div>
               </div>
             </div>
             {showPty && (
-              <div className="bg-black mt-2 border rounded-md overflow-hidden font-mono text-green-200 text-xs">
-                <div
-                  ref={ptyRef}
-                  className="px-3 py-2 max-h-40 overflow-y-auto break-words whitespace-pre-wrap"
-                >
-                  {ptyOutput || "(no output)"}
-                </div>
+              <div className="bg-black mt-2 border rounded-md overflow-hidden">
+                <div ref={ptyRef} style={{ height: "200px", width: "100%" }} />
               </div>
             )}
           </div>

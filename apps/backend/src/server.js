@@ -4,6 +4,7 @@ import { WebSocketServer } from "ws";
 import cors from "cors";
 import { runCommandPerRequest, describeConfig } from "./runner.js";
 import * as pty from "./ptySession.js";
+import { execSync } from "child_process";
 const DEBUG =
   String(process.env.VC_DEBUG || "").toLowerCase() === "true" ||
   process.env.VC_DEBUG === "1" ||
@@ -15,10 +16,21 @@ const dbg = (...args) => {
 
 const app = express();
 dbg("startup: debug enabled");
+// On macOS, if SSH_AUTH_SOCK isn't present (e.g., when started via Turbo), try to fetch from launchctl
+if (!process.env.SSH_AUTH_SOCK && process.platform === "darwin") {
+  try {
+    const sock = execSync("launchctl getenv SSH_AUTH_SOCK", {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (sock) process.env.SSH_AUTH_SOCK = sock;
+  } catch {}
+}
 dbg("startup: pty availability", {
   available: pty.isAvailable?.() || false,
   lastError: pty.getLastImportErrorMessage?.(),
 });
+dbg("startup: SSH_AUTH_SOCK", process.env.SSH_AUTH_SOCK || null);
 app.use(cors());
 app.use(express.json());
 
@@ -75,16 +87,20 @@ function handleStartSession(ws, msg) {
     });
     const existing = pty.getBuffer();
     if (existing) send(ws, { type: "output", data: existing });
-    const offData = pty.onOutput((chunk) =>
-      send(ws, { type: "output", data: chunk })
-    );
-    const offExit = pty.onExit((info) =>
-      send(ws, { type: "sessionExit", info })
-    );
-    ws.once("close", () => {
-      offData();
-      offExit();
-    });
+    // Prevent duplicate listeners: only add if not already added for this ws
+    if (!ws._ptyListenersAdded) {
+      ws._ptyListenersAdded = true;
+      const offData = pty.onOutput((chunk) =>
+        send(ws, { type: "output", data: chunk })
+      );
+      const offExit = pty.onExit((info) =>
+        send(ws, { type: "sessionExit", info })
+      );
+      ws.once("close", () => {
+        offData();
+        offExit();
+      });
+    }
   } catch (err) {
     dbg("ws: startSession failed", err?.message || String(err));
     send(ws, {
