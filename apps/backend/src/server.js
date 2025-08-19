@@ -169,6 +169,11 @@ function handleStop() {
   pty.stop();
 }
 
+function handleResize(msg) {
+  const { cols, rows } = msg || {};
+  pty.resize(Number(cols), Number(rows));
+}
+
 wss.on("connection", (ws, req) => {
   dbg("ws: connection", { url: req?.url });
   ws.on("message", async (data) => {
@@ -193,6 +198,9 @@ wss.on("connection", (ws, req) => {
         case "interrupt":
           dbg("ws: interrupt");
           return handleInterrupt();
+        case "resize":
+          dbg("ws: resize", { cols: msg?.cols, rows: msg?.rows });
+          return handleResize(msg);
         case "reset":
           dbg("ws: reset");
           return handleReset();

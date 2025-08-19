@@ -2,7 +2,7 @@
 
 "use client";
 
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
@@ -59,6 +59,20 @@ export default function Home() {
   // Debug: WS status + last event
   const [wsStatus, setWsStatus] = useState<string>("disconnected");
   const [wsLastEvent, setWsLastEvent] = useState<string>("");
+
+  // Send current terminal size to backend
+  const sendResizeNow = useCallback(() => {
+    const ws = wsRef.current;
+    const term = xtermRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !term) return;
+    try {
+      const cols = term.cols;
+      const rows = term.rows;
+      if (Number.isFinite(cols) && Number.isFinite(rows)) {
+        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+    } catch {}
+  }, []);
 
   // Check for Web Speech API support
   useEffect(() => {
@@ -244,6 +258,8 @@ export default function Home() {
       try {
         fit.fit();
       } catch {}
+      // Notify backend of size
+      sendResizeNow();
       xtermRef.current = term;
       fitRef.current = fit;
       // Write any existing buffer (use ref to avoid hook deps)
@@ -256,12 +272,14 @@ export default function Home() {
       const ro = new ResizeObserver(() => {
         try {
           fitRef.current?.fit();
+          sendResizeNow();
         } catch {}
       });
       ro.observe(ptyRef.current);
       const onResize = () => {
         try {
           fitRef.current?.fit();
+          sendResizeNow();
         } catch {}
       };
       window.addEventListener("resize", onResize);
@@ -276,7 +294,7 @@ export default function Home() {
         lastWrittenIndexRef.current = 0;
       };
     }
-  }, [showPty]);
+  }, [showPty, sendResizeNow]);
 
   // Append new PTY output to xterm without re-rendering
   useEffect(() => {

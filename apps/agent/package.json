@@ -1,0 +1,15 @@
+{
+  "name": "vc-agent",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "bin": {
+    "vc-agent": "bin/agent.js"
+  },
+  "scripts": {
+    "start": "node bin/agent.js",
+    "dev": "node --watch bin/agent.js"
+  },
+  "engines": {"node": ">=18"},
+  "license": "MIT"
+}

@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-  "dev": "VC_DEBUG=1 node src/start.js",
+  "dev": "VC_PTY_CMD=\"node\" VC_PTY_ARGS=\"../agent/bin/agent.js\" VC_DEBUG=1 node --watch src/start.js",
   "start": "node src/start.js",
   "server": "node src/start.js",
   "test": "node src/selftest.js"

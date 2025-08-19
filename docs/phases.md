@@ -20,6 +20,10 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
 - Goal: Maintain a live interactive session for stateful tools.
 - Add:
   - PTY integration (node-pty) with a single long-lived process.
+  - IMPORTANT: Configure PTY to run a stateful agent (via VC_PTY_CMD/VC_PTY_ARGS) rather than a plain shell if you want prompts treated as natural language. If you point PTY at your login shell, spoken/typed prompts will be executed as shell commands.
+  - Optional built-in agent: provide a minimal Node.js agent (apps/agent) that keeps simple in-memory context and reads stdin → writes stdout. This lets PTY be useful immediately without external tools.
+    - Wiring example (from apps/backend): VC_PTY_CMD="node", VC_PTY_ARGS="../agent/bin/agent.js".
+    - Scope: safe by default (no exec), basic commands (help/clear/exit), and a place to prototype approvals later.
   - WS message types:
     - Client → Server: `startSession { options? }`, `prompt { id?, text }`, `interrupt`, `reset`, `stop`.
     - Server → Client: `sessionStarted { ok, cfg, running }`, `output { data }` (streaming), `sessionExit { info }`, `ack { id }`, `reply { id, text }`, `error { id?, error, message, preview? }`.
@@ -32,6 +36,7 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
 - Goal: Don’t flood UI; show concise bullets.
 - Add:
   - Local map-only summarization using basic chunking + deterministic rules OR a tiny local model if available.
+  - Scope note: Summarization is output-only; it does not change routing or input semantics. Whatever the PTY/runner outputs is summarized.
   - UI splits “Raw log” vs “Summary.”
   - WS events: replyChunk + summaryUpdate.
 - Minimal approach:
@@ -89,6 +94,7 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
 - Goal: Smooth integrations with 1–2 popular CLIs (e.g., Aider, Open Interpreter).
 - Add:
   - Per-agent profile: start command, env, ready signal, completion heuristics, capabilities flags.
+  - Profiles formalize PTY startup (VC_PTY_CMD/ARGS) and clarify input semantics so prompts are interpreted by the agent, not a bare shell.
   - PTY quirks fixed per agent; restart policy.
 - Risks addressed: variance in agent behavior.
 

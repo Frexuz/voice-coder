@@ -162,3 +162,23 @@ export function start(options = {}) {
 
   return { ok: true, pid: pty.pid, cfg: state.cfg };
 }
+
+export function resize(cols, rows) {
+  if (!state.pty) return;
+  try {
+    if (
+      Number.isFinite(cols) &&
+      Number.isFinite(rows) &&
+      cols > 0 &&
+      rows > 0
+    ) {
+      state.pty.resize(Math.floor(cols), Math.floor(rows));
+      dbg("pty: resized", { cols: Math.floor(cols), rows: Math.floor(rows) });
+      state.cfg = {
+        ...(state.cfg || {}),
+        cols: Math.floor(cols),
+        rows: Math.floor(rows),
+      };
+    }
+  } catch {}
+}
