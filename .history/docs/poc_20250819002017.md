@@ -1,0 +1,131 @@
+```markdown
+PoC PRD (ultra-minimal)
+Project: Voice-to-CLI via local backend with Next.js frontend
+Scope: Single-device, LAN-only proof of concept
+Goal: Press-to-talk in the browser → transcribe speech → send text to backend → backend asks a simple “agent” → stream the agent’s response back to the UI over WebSocket
+
+1) Success criteria
+- From a phone/laptop on the same LAN, open the Next.js app.
+- Hold a mic button, say “hello,” release.
+- The UI shows transcription (“hello”) and then shows the agent response text: “you said ‘hello’.”
+- Round-trip under ~1.5s on average.
+- Works without any external cloud services (no SaaS, no hosted LLM/STT).
+
+2) Architecture (PoC)
+- Frontend: Next.js app (App Router), served by a local Node server.
+  - Pages: one page with a mic button and a message area.
+  - Client-only component for mic and WebSocket handling.
+  - Uses browser Web Speech API for on-device STT when available; fallback to a text input.
+- Backend: Same Node process hosting Next.js plus a lightweight WebSocket server.
+  - Endpoints:
+    - POST /api/prompt (optional fallback): send text, get JSON reply.
+  - WebSocket: ws://<host>:<port>/ws
+    - Client sends a message with the transcript.
+    - Server sends back a response event containing the agent’s reply.
+- Agent: Stub function that returns “you said ‘<text>’”.
+  - Later can be swapped to spawn a real CLI per request or maintain a persistent PTY session.
+
+3) Data flow
+- User press-and-hold mic → browser starts SpeechRecognition.
+- On release:
+  - The final transcript is obtained on-device.
+  - The client opens/uses a persistent WebSocket connection to the backend.
+  - Sends a JSON message: {type: "prompt", id, text}
+- Backend receives the prompt:
+  - Calls the agent stub to generate a response string.
+  - Sends back JSON on the same WebSocket: {type: "reply", id, text}
+- UI renders:
+  - Shows “You said: <transcript>”
+  - Shows “Agent reply: you said ‘<transcript>’”
+
+4) WebSocket protocol (simple)
+- Text JSON messages only.
+- Client → Server messages:
+  - {type: "hello"} on connect (optional)
+  - {type: "prompt", id: string, text: string}
+- Server → Client messages:
+  - {type: "ack", id}
+  - {type: "reply", id, text: string}
+  - {type: "error", id?, message: string}
+- One active connection per browser tab; reconnect on close.
+
+5) UI/UX requirements
+- Single page with:
+  - Press-and-hold mic button labeled “Hold to Talk”
+  - Status text: Idle, Listening…, Sending…, Waiting…, Done/Error
+  - A text input + Send button fallback
+  - Two bubbles:
+    - “You said: —”
+    - “Agent reply: —”
+- Mobile-friendly:
+  - Responsive layout, large touch targets.
+- Graceful degradation:
+  - If Web Speech API unsupported, disable mic and use text input path.
+  - If WS fails, fall back to POST /api/prompt.
+
+6) Platforms/browsers (PoC)
+- Desktop Chrome: supported (HTTP allowed for mic).
+- Android Chrome: supported.
+- iOS Safari: Web Speech API often restricted; acceptable for PoC to rely on typing or instruct user to add to home screen or use HTTPS dev cert if needed.
+
+7) Config and deployment (home network)
+- Run a single Node process (Next.js dev or production build) on a LAN host.
+- Access via http://<LAN-IP>:<port>.
+- No external dependencies, no database, no auth for PoC.
+- Port defaults: 3000.
+
+8) Non-goals (PoC)
+- No SaaS control plane, no multi-device routing.
+- No persistent agent session/PTY yet.
+- No approvals, diffs, or summarization models.
+- No TLS or accounts; trust LAN.
+
+9) Extensibility notes (for later)
+- Replace agent stub with:
+  - Per-request spawn of a CLI and capture stdout, or
+  - Long-lived PTY session controlled by a WS message type.
+- Add streaming replies:
+  - Support {type: "replyChunk", id, textChunk} followed by {type:"replyDone", id}.
+- Add a simple messages log and session ids.
+- Swap STT:
+  - Keep local by default; optionally add a server STT endpoint (cloud or local Vosk/Whisper) later.
+- Move to HTTPS + mic permissions for iOS reliability.
+
+10) Risks and mitigations (PoC-level)
+- Web Speech API not available: provide text input fallback.
+- WS blocked by network: allow POST fallback.
+- iOS mic permissions: document requirement; accept limited support for PoC.
+
+11) Acceptance checklist
+- WebSocket connects and stays alive during page session.
+- Saying “hello” results in the UI showing:
+  - You said: hello
+  - Agent reply: you said ‘hello’
+- Fallback path (typed input) returns the same “you said ‘…’” reply.
+- Works from a phone on the same Wi‑Fi using the machine’s LAN IP.
+
+## Quick run (local PoC)
+
+1. Install and run the apps from the repo root (or per-app):
+
+   - Backend:
+
+     cd apps/backend
+     npm install
+     npm start
+
+     (listens on http://localhost:4000)
+
+   - Frontend:
+
+     cd apps/frontend
+     npm install
+     npm start
+
+     (listens on http://localhost:3000 and proxies POST /api/prompt to the backend)
+
+2. Open http://<host-ip>:3000 from a device on the same LAN and try the mic or typed input.
+
+Notes:
+- If the browser's Web Speech API is unavailable, use the text input fallback.
+- The frontend will attempt a WebSocket to port 4000; if it fails, it falls back to POST /api/prompt.

@@ -1,6 +1,10 @@
 {
   "$schema": "https://turborepo.com/schema.json",
   "ui": "tui",
+  "pipeline": {
+    "apps/backend": {},
+    "apps/frontend": {}
+  },
   "tasks": {
     "build": {
       "inputs": ["$TURBO_DEFAULT$", ".env*"],
@@ -22,15 +26,6 @@
     },
     "check-types": {
       "dependsOn": ["^build", "^check-types"]
-    },
-    "server": {
-      "cache": false,
-      "persistent": true
-    },
-    "e2e": {
-      "dependsOn": ["^server"],
-      "inputs": ["apps/frontend/**"],
-      "cache": false
     },
     "dev": {
       "dependsOn": ["^build"],

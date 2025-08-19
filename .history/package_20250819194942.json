@@ -4,7 +4,10 @@
   "scripts": {
     "build": "turbo run build",
     "clean": "turbo run clean",
-    "dev": "turbo run dev e2e",
+    "dev": "turbo run dev ftest e2e",
+    "e2e:watch": "turbo run e2e --filter=e2e",
+    "ftest": "turbo run ftest",
+    "e2e": "turbo run test --filter=e2e",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "lint": "turbo run lint",
     "test": "turbo run test",
@@ -12,8 +15,8 @@
   },
   "devDependencies": {
     "prettier": "^3.6.0",
-    "turbo": "^2.5.6",
-    "@playwright/test": "^1.47.2"
+  "turbo": "^2.5.6",
+  "@playwright/test": "^1.47.2"
   },
   "engines": {
     "node": ">=18"

@@ -1,0 +1,14 @@
+{
+  "name": "e2e",
+  "private": true,
+  "scripts": {
+  "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:watch": "playwright test --ui",
+    "e2e": "playwright test --ui",
+    "postinstall": "playwright install --with-deps"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.47.2"
+  }
+}

@@ -23,15 +23,6 @@
     "check-types": {
       "dependsOn": ["^build", "^check-types"]
     },
-    "server": {
-      "cache": false,
-      "persistent": true
-    },
-    "e2e": {
-      "dependsOn": ["^server"],
-      "inputs": ["apps/frontend/**"],
-      "cache": false
-    },
     "dev": {
       "dependsOn": ["^build"],
       "cache": false,

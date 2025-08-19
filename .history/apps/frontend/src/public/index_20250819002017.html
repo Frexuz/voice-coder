@@ -1,0 +1,138 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Voice Coder PoC</title>
+  <style>
+    body {
+      font-family: system-ui, Arial;
+      max-width: 640px;
+      margin: 2rem auto;
+      padding: 1rem;
+    }
+
+    button {
+      font-size: 1.25rem;
+      padding: .75rem 1rem;
+    }
+
+    .bubble {
+      padding: .75rem;
+      border-radius: 8px;
+      margin: .5rem 0;
+    }
+
+    .you {
+      background: #e6f7ff
+    }
+
+    .agent {
+      background: #f6f6f6
+    }
+
+    .status {
+      color: #666;
+      font-size: .9rem
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Voice Coder PoC</h1>
+  <div>
+    <button id="mic">Hold to Talk</button>
+    <span class="status" id="status">Idle</span>
+  </div>
+
+  <div>
+    <input id="textFallback" placeholder="Type fallback input" style="width:70%" />
+    <button id="sendBtn">Send</button>
+  </div>
+
+  <div id="you" class="bubble you">You said: —</div>
+  <div id="agent" class="bubble agent">Agent reply: —</div>
+
+  <script>
+    const status = document.getElementById('status');
+    const mic = document.getElementById('mic');
+    const you = document.getElementById('you');
+    const agent = document.getElementById('agent');
+    const textFallback = document.getElementById('textFallback');
+    const sendBtn = document.getElementById('sendBtn');
+
+    let ws;
+    function connectWS() {
+      const url = new URL(window.location.origin);
+      url.port = 4000;
+      url.pathname = '/ws';
+      ws = new WebSocket(url.toString());
+      ws.addEventListener('open', () => { status.textContent = 'WS Connected'; });
+      ws.addEventListener('message', (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'ack') status.textContent = 'Server ACK';
+          if (msg.type === 'reply') {
+            status.textContent = 'Done';
+            agent.textContent = 'Agent reply: ' + msg.text;
+          }
+        } catch (e) { console.warn('ws parse error', e); }
+      });
+      ws.addEventListener('close', () => { status.textContent = 'WS closed'; setTimeout(connectWS, 1000); });
+      ws.addEventListener('error', () => { status.textContent = 'WS error'; ws.close(); });
+    }
+
+    connectWS();
+
+    function sendPrompt(text) {
+      const id = Math.random().toString(36).slice(2, 9);
+      you.textContent = 'You said: ' + text;
+      status.textContent = 'Sending...';
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'prompt', id, text }));
+      } else {
+        // fallback to POST
+        status.textContent = 'WS closed, POST fallback';
+        fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, text }) })
+          .then(r => r.json()).then(j => { agent.textContent = 'Agent reply: ' + j.text; status.textContent = 'Done'; })
+          .catch(e => { status.textContent = 'Error'; });
+      }
+    }
+
+    // Simple press-and-hold using Web Speech API
+    let recognition, listening = false;
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SR();
+      recognition.lang = 'en-US';
+      recognition.interimResults = false;
+      recognition.continuous = false;
+      recognition.onstart = () => { status.textContent = 'Listening...'; listening = true; };
+      recognition.onend = () => {
+        if (listening) status.textContent = 'Stopped';
+        listening = false;
+      };
+      recognition.onresult = (ev) => {
+        const t = ev.results[0][0].transcript;
+        sendPrompt(t);
+      };
+    } else {
+      mic.disabled = true;
+      mic.textContent = 'Mic unavailable';
+    }
+
+    mic.addEventListener('mousedown', () => { if (recognition) { recognition.start(); } });
+    mic.addEventListener('mouseup', () => { if (recognition) { recognition.stop(); } });
+    mic.addEventListener('touchstart', () => { if (recognition) { recognition.start(); } });
+    mic.addEventListener('touchend', () => { if (recognition) { recognition.stop(); } });
+
+    sendBtn.addEventListener('click', () => {
+      const t = textFallback.value.trim();
+      if (!t) return;
+      sendPrompt(t);
+    });
+  </script>
+</body>
+
+</html>

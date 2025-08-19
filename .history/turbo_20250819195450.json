@@ -36,6 +36,11 @@
       "dependsOn": ["^build"],
       "cache": false,
       "persistent": true
+    },
+    "unit-tests": {
+      "inputs": ["apps/frontend/**"],
+      "cache": false,
+      "persistent": true
     }
   }
 }
