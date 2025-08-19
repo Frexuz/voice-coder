@@ -104,12 +104,58 @@ async function test_ws_roundtrip() {
   });
 }
 
+async function test_ws_pty_session() {
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
+    let started = false;
+    let sawOutput = false;
+    let sawExit = false;
+    const token = `PING_${Math.random().toString(36).slice(2, 8)}`;
+    const timer = setTimeout(
+      () => reject(new Error("pty session timeout")),
+      10000
+    );
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "startSession", options: {} }));
+    });
+    ws.on("message", (m) => {
+      const msg = JSON.parse(m.toString());
+      if (msg.type === "sessionStarted" && msg.ok) {
+        started = true;
+        // Use echo if available in shell; otherwise token may appear in PS too
+        ws.send(JSON.stringify({ type: "prompt", text: `echo ${token}` }));
+      } else if (msg.type === "output") {
+        if (String(msg.data).includes(token)) {
+          sawOutput = true;
+          ws.send(JSON.stringify({ type: "stop" }));
+        }
+      } else if (msg.type === "sessionExit") {
+        sawExit = true;
+        clearTimeout(timer);
+        ws.close();
+      }
+    });
+    ws.on("close", () => {
+      try {
+        assert(started, "pty started");
+        assert(sawOutput, "pty saw output");
+        assert(sawExit, "pty exit sent");
+        resolve(null);
+      } catch (e) {
+        reject(e);
+      }
+    });
+    ws.on("error", reject);
+  });
+}
+
 async function main() {
   await withServer(async () => {
     await test_http_short();
     await test_http_nonzero();
     await test_http_long_input();
     await test_ws_roundtrip();
+    await test_ws_pty_session();
     // timeout test is environment-sensitive; optional
     console.log("SELFTEST PASS");
   });

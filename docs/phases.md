@@ -20,7 +20,9 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
 - Goal: Maintain a live interactive session for stateful tools.
 - Add:
   - PTY integration (node-pty) with a single long-lived process.
-  - WS message types: startSession, prompt, interrupt, reset, stop.
+  - WS message types:
+    - Client → Server: `startSession { options? }`, `prompt { id?, text }`, `interrupt`, `reset`, `stop`.
+    - Server → Client: `sessionStarted { ok, cfg, running }`, `output { data }` (streaming), `sessionExit { info }`, `ack { id }`, `reply { id, text }`, `error { id?, error, message, preview? }`.
   - Backpressure and output ring buffer (e.g., last 5–10k lines).
 - Test cases:
   - Multi-step interactions, interrupts (Ctrl-C), restarts.
