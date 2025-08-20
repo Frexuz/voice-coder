@@ -49,6 +49,7 @@ export default function Home() {
   const [showPty, setShowPty] = useState<boolean>(false);
   const [ptyRunning, setPtyRunning] = useState<boolean>(false);
   const [ptyOutput, setPtyOutput] = useState<string>("");
+  const [summaryBullets, setSummaryBullets] = useState<string[]>([]);
   const ptyRef = useRef<HTMLDivElement | null>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -155,6 +156,14 @@ export default function Home() {
             } else if (msg.type === "output") {
               setPtyOutput((prev) => prev + String(msg.data || ""));
               setShowPty(true);
+            } else if (msg.type === "summaryUpdate") {
+              const arr = Array.isArray(msg?.summary?.bullets)
+                ? (msg.summary.bullets as unknown[])
+                : [];
+              const bullets: string[] = arr
+                .map((b) => (typeof b === "string" ? b : JSON.stringify(b)))
+                .filter((s) => typeof s === "string" && s.length > 0);
+              setSummaryBullets(bullets);
             } else if (msg.type === "sessionExit") {
               setPtyRunning(false);
               setPtyOutput((prev) => prev + "\n[session exited]\n");
@@ -603,8 +612,33 @@ export default function Home() {
               </div>
             </div>
             {showPty && (
-              <div className="bg-black mt-2 border rounded-md overflow-hidden">
-                <div ref={ptyRef} style={{ height: "200px", width: "100%" }} />
+              <div className="gap-2 grid grid-cols-1 md:grid-cols-2 mt-2">
+                <div className="bg-white border rounded-md overflow-hidden">
+                  <div className="px-2 py-1 border-b font-semibold text-gray-600 text-xs">
+                    Summary
+                  </div>
+                  <div className="px-3 py-2 text-gray-800 text-sm">
+                    {summaryBullets.length === 0 ? (
+                      <div className="text-gray-400 text-xs">
+                        No summary yet…
+                      </div>
+                    ) : (
+                      <ul className="pl-4 list-disc">
+                        {summaryBullets.map((b) => (
+                          <li key={b} className="mb-1">
+                            {b}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+                <div className="bg-black border rounded-md overflow-hidden">
+                  <div
+                    ref={ptyRef}
+                    style={{ height: "200px", width: "100%" }}
+                  />
+                </div>
               </div>
             )}
           </div>

@@ -4,6 +4,7 @@ import { WebSocketServer } from "ws";
 import cors from "cors";
 import { runCommandPerRequest, describeConfig } from "./runner.js";
 import * as pty from "./ptySession.js";
+import { summarizeIfChanged, summarize } from "./summarizer.js";
 import { execSync } from "child_process";
 const DEBUG =
   String(process.env.VC_DEBUG || "").toLowerCase() === "true" ||
@@ -87,12 +88,29 @@ function handleStartSession(ws, msg) {
     });
     const existing = pty.getBuffer();
     if (existing) send(ws, { type: "output", data: existing });
+    // Send initial summary of existing buffer
+    try {
+      const s = summarizeIfChanged(existing || "", ws._summaryHash || null);
+      if (s.changed && s.summary) {
+        ws._summaryHash = s.hash;
+        send(ws, { type: "summaryUpdate", summary: s.summary });
+      }
+    } catch {}
     // Prevent duplicate listeners: only add if not already added for this ws
     if (!ws._ptyListenersAdded) {
       ws._ptyListenersAdded = true;
-      const offData = pty.onOutput((chunk) =>
-        send(ws, { type: "output", data: chunk })
-      );
+      const offData = pty.onOutput((chunk) => {
+        send(ws, { type: "output", data: chunk });
+        // Throttle by content-hash to avoid spamming
+        try {
+          const buf = pty.getBuffer();
+          const s = summarizeIfChanged(buf || "", ws._summaryHash || null);
+          if (s.changed && s.summary) {
+            ws._summaryHash = s.hash;
+            send(ws, { type: "summaryUpdate", summary: s.summary });
+          }
+        } catch {}
+      });
       const offExit = pty.onExit((info) =>
         send(ws, { type: "sessionExit", info })
       );
@@ -133,6 +151,11 @@ async function handlePrompt(ws, msg) {
     if (result.ok) {
       dbg("ws: ok", { id: msg.id, bytes: result.text?.length || 0 });
       send(ws, { type: "reply", id: msg.id, text: result.text });
+      // Also emit a one-shot summary for non-PTY replies
+      try {
+        const s = summarize(result.text || "");
+        send(ws, { type: "summaryUpdate", summary: s });
+      } catch {}
     } else {
       dbg("ws: error", {
         id: msg.id,
