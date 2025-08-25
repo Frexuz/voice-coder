@@ -2,9 +2,13 @@ import express from "express";
 import http from "http";
 import { WebSocketServer } from "ws";
 import cors from "cors";
-import { runCommandPerRequest, describeConfig } from "./runner.js";
+import {
+  runCommandPerRequest,
+  runCommandPerRequestStream,
+  describeConfig,
+} from "./runner.js";
 import * as pty from "./ptySession.js";
-import { summarizeIfChanged, summarize } from "./summarizer.js";
+import { summarizeIfChanged } from "./summarizer.js";
 import { execSync } from "child_process";
 const DEBUG =
   String(process.env.VC_DEBUG || "").toLowerCase() === "true" ||
@@ -147,14 +151,36 @@ async function handlePrompt(ws, msg) {
     return;
   }
   try {
-    const result = await runCommandPerRequest(msg.text);
+    let aggregate = "";
+    const result = await runCommandPerRequestStream(msg.text, {
+      onStdoutChunk: (chunk) => {
+        aggregate += chunk;
+        // Stream to client as replyChunk when not using PTY
+        send(ws, { type: "replyChunk", id: msg.id, data: chunk });
+        // Opportunistic summary update based on aggregated text
+        try {
+          const s = summarizeIfChanged(aggregate, ws._summaryHash || null);
+          if (s.changed && s.summary) {
+            ws._summaryHash = s.hash;
+            send(ws, { type: "summaryUpdate", summary: s.summary });
+          }
+        } catch {}
+      },
+      onStderrChunk: (chunk) => {
+        // For visibility, also stream stderr chunks
+        send(ws, { type: "replyChunk", id: msg.id, data: chunk, stderr: true });
+      },
+    });
     if (result.ok) {
       dbg("ws: ok", { id: msg.id, bytes: result.text?.length || 0 });
       send(ws, { type: "reply", id: msg.id, text: result.text });
-      // Also emit a one-shot summary for non-PTY replies
+      // Final summary for any last bits not captured by hash change
       try {
-        const s = summarize(result.text || "");
-        send(ws, { type: "summaryUpdate", summary: s });
+        const s = summarizeIfChanged(aggregate, ws._summaryHash || null);
+        if (s.changed && s.summary) {
+          ws._summaryHash = s.hash;
+          send(ws, { type: "summaryUpdate", summary: s.summary });
+        }
       } catch {}
     } else {
       dbg("ws: error", {

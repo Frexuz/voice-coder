@@ -153,7 +153,8 @@ export default function Home() {
             } else if (msg.type === "sessionStarted") {
               setPtyRunning(!!msg.running);
               setShowPty(true);
-            } else if (msg.type === "output") {
+            } else if (msg.type === "output" || msg.type === "replyChunk") {
+              // PTY output or non-PTY streaming chunks
               setPtyOutput((prev) => prev + String(msg.data || ""));
               setShowPty(true);
             } else if (msg.type === "summaryUpdate") {

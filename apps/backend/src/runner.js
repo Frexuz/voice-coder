@@ -19,6 +19,14 @@ function dbg(...args) {
   console.log("[vc-debug]", ...args);
 }
 
+// Shared safe kill helper to avoid duplicate implementations
+function safeKill(child) {
+  if (!child || child.killed) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {}
+}
+
 function filterAllowedAscii(str) {
   let out = "";
   for (let i = 0; i < str.length; i++) {
@@ -93,17 +101,9 @@ export async function runCommandPerRequest(inputText) {
       return;
     }
 
-    const kill = () => {
-      if (!child.killed) {
-        try {
-          child.kill("SIGKILL");
-        } catch {}
-      }
-    };
-
     const timer = setTimeout(() => {
       timedOut = true;
-      kill();
+      safeKill(child);
       dbg(`runner: timeout after ${TIMEOUT_MS}ms, pid=${child.pid}`);
     }, TIMEOUT_MS);
 
@@ -178,6 +178,152 @@ export async function runCommandPerRequest(inputText) {
       }
 
       // Final tidy up output
+      const out = stdout.trim();
+      const err = stderr.trim();
+
+      if (code === 0) {
+        const note = [
+          wasTruncated ? "[input truncated]" : null,
+          stdoutTruncated ? "[output truncated]" : null,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        resolve({
+          ok: true,
+          text: note ? `${out}\n${note}`.trim() : out,
+        });
+      } else {
+        const preview = err || out || "No output";
+        resolve({
+          ok: false,
+          error: "command_failed",
+          message: `Command failed (code ${code ?? "unknown"}).`,
+          status: 500,
+          preview,
+          stdout: out,
+          stderr: err,
+        });
+      }
+    });
+  });
+}
+
+// Streaming variant used by WS to emit replyChunk events while the process runs.
+// onStdoutChunk/onStderrChunk receive sanitized text chunks as they arrive.
+export async function runCommandPerRequestStream(
+  inputText,
+  { onStdoutChunk, onStderrChunk } = {}
+) {
+  const text = sanitizeText(inputText, MAX_INPUT);
+  if (!text) {
+    return {
+      ok: false,
+      error: "empty_input",
+      message: "Please provide some text.",
+      status: 400,
+    };
+  }
+
+  const wasTruncated = String(inputText || "").length > text.length;
+
+  return new Promise((resolve) => {
+    const started = Date.now();
+    dbg("runner(stream): spawning", {
+      cmd: CMD,
+      args: ARGS,
+      textPreview: text.slice(0, 120),
+    });
+    let timedOut = false;
+    let stdout = "";
+    let stderr = "";
+    let stdoutTruncated = false;
+
+    let child;
+    try {
+      child = spawn(CMD, [...ARGS, text], {
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: false,
+      });
+      dbg(`runner(stream): spawned pid=${child.pid}`);
+    } catch (err) {
+      dbg("runner(stream): spawn_error", err?.message || err);
+      resolve({
+        ok: false,
+        error: "spawn_error",
+        message: "Command failed to start.",
+        details: String(err?.message || err),
+        status: 500,
+      });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      safeKill(child);
+      dbg(`runner(stream): timeout after ${TIMEOUT_MS}ms, pid=${child.pid}`);
+    }, TIMEOUT_MS);
+
+    child.stdout.on("data", (buf) => {
+      if (stdout.length >= MAX_STDOUT) {
+        stdoutTruncated = true;
+        return;
+      }
+      const chunk = filterAllowedAscii(buf.toString("utf8"));
+      // Emit chunk first for real-time UX
+      try {
+        if (onStdoutChunk && chunk) onStdoutChunk(chunk);
+      } catch {}
+      stdout += chunk;
+      if (stdout.length > MAX_STDOUT) {
+        stdout = stdout.slice(0, MAX_STDOUT);
+        stdoutTruncated = true;
+      }
+    });
+
+    child.stderr.on("data", (buf) => {
+      if (stderr.length >= MAX_STDERR) return;
+      const chunk = filterAllowedAscii(buf.toString("utf8"));
+      try {
+        if (onStderrChunk && chunk) onStderrChunk(chunk);
+      } catch {}
+      stderr += chunk;
+      if (stderr.length > MAX_STDERR) {
+        stderr = stderr.slice(0, MAX_STDERR);
+      }
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      dbg("runner(stream): child error", err?.message || err);
+      resolve({
+        ok: false,
+        error: "spawn_error",
+        message: "Command failed to start.",
+        details: String(err?.message || err),
+        status: 500,
+      });
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const dur = Date.now() - started;
+      dbg(
+        `runner(stream): close pid=${child.pid} code=${code} signal=${signal} dur=${dur}ms out=${stdout.length}B err=${stderr.length}B${
+          timedOut ? " (timed out)" : ""
+        }${stdoutTruncated ? " (stdout truncated)" : ""}`
+      );
+      if (timedOut) {
+        resolve({
+          ok: false,
+          error: "timeout",
+          message: `Command timed out after ${Math.round(TIMEOUT_MS / 1000)}s`,
+          status: 504,
+          stdout,
+          stderr,
+        });
+        return;
+      }
+
       const out = stdout.trim();
       const err = stderr.trim();
 

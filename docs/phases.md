@@ -16,7 +16,7 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
   - Short prompts, long prompts, CLI exits non-zero, timeouts.
 - Risks addressed: executing tools safely, safe output handling.
 
-[ ] Phase 2 — Persistent CLI session (PTY)
+[x] Phase 2 — Persistent CLI session (PTY)
 - Goal: Maintain a live interactive session for stateful tools.
 - Add:
   - PTY integration (node-pty) with a single long-lived process.
@@ -32,13 +32,14 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
   - Multi-step interactions, interrupts (Ctrl-C), restarts.
 - Risks addressed: interactive control, process lifecycle, memory bounds.
 
-[ ] Phase 3 — Simple summarization (cloud-free)
+[x] Phase 3 — Simple summarization (cloud-free)
 - Goal: Don’t flood UI; show concise bullets.
 - Add:
   - Local map-only summarization using basic chunking + deterministic rules OR a tiny local model if available.
   - Scope note: Summarization is output-only; it does not change routing or input semantics. Whatever the PTY/runner outputs is summarized.
   - UI splits “Raw log” vs “Summary.”
   - WS events: replyChunk + summaryUpdate.
+  - Implemented: backend emits summaryUpdate on buffer changes and streams non-PTY output via replyChunk; UI shows Summary vs Raw log.
 - Minimal approach:
   - For now, just cap and truncate raw lines; synthesize 3–5 bullets via template rules (errors, files, durations) extracted by regex where obvious.
 - Risks addressed: user experience under noisy output.
