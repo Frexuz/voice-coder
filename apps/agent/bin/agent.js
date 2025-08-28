@@ -62,7 +62,50 @@ function handleLine(raw) {
       println("- recall         List saved notes");
       println("- clear          Clear saved notes");
       println("- time           Show current time");
+      println("- install NAME   Simulate installing a package (fake)");
+      println("- apply-diff     Simulate applying a diff (fake)");
+      println("- network URL    Simulate a curl-like fetch (fake)");
       println("- exit|quit      Exit");
+      break;
+    }
+    case "install": {
+      // Fake installer: just prints lines, no real exec
+      if (!arg) {
+        println("Usage: install NAME");
+        break;
+      }
+      println(`Installing "${arg}"...`);
+      println("Resolving dependencies...");
+      println("Downloading...");
+      println("Linking...");
+      println("Building native modules (fake)...");
+      println("Done in 0.2s");
+      break;
+    }
+    case "apply-diff": {
+      // Fake diff apply
+      println("Applying diff (fake)\n");
+      println("diff --git a/src/foo.js b/src/foo.js");
+      println("index e69de29..4b825dc 100644");
+      println("--- a/src/foo.js");
+      println("+++ b/src/foo.js");
+      println("@@ -0,0 +1,3 @@");
+      println("+export function foo() {");
+      println("+  return 'bar';");
+      println("+}");
+      println("\nApplied successfully.");
+      break;
+    }
+    case "network": {
+      const url = arg || "https://example.com";
+      println(`curl ${url}`);
+      println("> GET / HTTP/1.1");
+      println("< HTTP/1.1 200 OK");
+      println("< content-type: text/html; charset=UTF-8");
+      println("< content-length: 1256");
+      println(
+        "\n<!doctype html><html><head><title>Example</title></head><body>... (fake body) ...</body></html>"
+      );
       break;
     }
     case "remember": {

@@ -149,6 +149,119 @@ async function test_ws_pty_session() {
   });
 }
 
+async function test_ws_approval_flow() {
+  // Use PTY session and a risky marker inside an echo command to avoid executing external tools.
+  // The classifier sees the raw text (containing "git apply"), then we approve/deny.
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
+    let started = false;
+    let gotRequest = false;
+    let sawApproved = false;
+    const token = `APPROVED_${Math.random().toString(36).slice(2, 6)}`;
+    const timer = setTimeout(
+      () => reject(new Error("approval approve timeout")),
+      12000
+    );
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "startSession", options: {} }));
+    });
+    ws.on("message", (m) => {
+      const msg = JSON.parse(m.toString());
+      if (msg.type === "sessionStarted" && msg.ok) {
+        started = true;
+        // Risky text but safe execution: echo includes risky marker
+        ws.send(
+          JSON.stringify({
+            type: "prompt",
+            id: "ap1",
+            text: `echo git apply patch.diff && echo ${token}`,
+          })
+        );
+      } else if (msg.type === "actionRequest") {
+        gotRequest = true;
+        ws.send(
+          JSON.stringify({
+            type: "actionResponse",
+            actionId: msg.actionId,
+            approve: true,
+          })
+        );
+      } else if (msg.type === "output") {
+        if (String(msg.data || "").includes(token)) {
+          sawApproved = true;
+          clearTimeout(timer);
+          ws.close();
+        }
+      }
+    });
+    ws.on("close", () => {
+      try {
+        assert(started, "approval: pty started");
+        assert(gotRequest, "approval: got request (approve)");
+        assert(sawApproved, "approval: approved path produced output");
+        resolve(null);
+      } catch (e) {
+        reject(e);
+      }
+    });
+    ws.on("error", reject);
+  });
+
+  await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
+    let started = false;
+    let gotRequest = false;
+    let gotDeniedError = false;
+    const timer = setTimeout(
+      () => reject(new Error("approval deny timeout")),
+      12000
+    );
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ type: "startSession", options: {} }));
+    });
+    ws.on("message", (m) => {
+      const msg = JSON.parse(m.toString());
+      if (msg.type === "sessionStarted" && msg.ok) {
+        started = true;
+        ws.send(
+          JSON.stringify({
+            type: "prompt",
+            id: "ap2",
+            text: `echo git apply patch2.diff && echo DENIED_OK`,
+          })
+        );
+      } else if (msg.type === "actionRequest") {
+        gotRequest = true;
+        // Deny this one
+        ws.send(
+          JSON.stringify({
+            type: "actionResponse",
+            actionId: msg.actionId,
+            approve: false,
+          })
+        );
+      } else if (msg.type === "error" && msg.error === "denied") {
+        gotDeniedError = true;
+        clearTimeout(timer);
+        ws.close();
+      } else if (msg.type === "output") {
+        // If we accidentally executed, we'd see DENIED_OK; ensure we don't require that
+      }
+    });
+    ws.on("close", () => {
+      try {
+        assert(started, "approval: pty started (deny)");
+        assert(gotRequest, "approval: got request (deny)");
+        assert(gotDeniedError, "approval: error on deny");
+        resolve(null);
+      } catch (e) {
+        reject(e);
+      }
+    });
+    ws.on("error", reject);
+  });
+}
+
 async function main() {
   await withServer(async () => {
     await test_http_short();
@@ -156,6 +269,7 @@ async function main() {
     await test_http_long_input();
     await test_ws_roundtrip();
     await test_ws_pty_session();
+    await test_ws_approval_flow();
     // timeout test is environment-sensitive; optional
     console.log("SELFTEST PASS");
   });

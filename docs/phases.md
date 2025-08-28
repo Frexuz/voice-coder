@@ -44,7 +44,7 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
   - For now, just cap and truncate raw lines; synthesize 3–5 bullets via template rules (errors, files, durations) extracted by regex where obvious.
 - Risks addressed: user experience under noisy output.
 
-[ ] Phase 4 — Approvals and safe actions
+[x] Phase 4 — Approvals and safe actions
 - Goal: Human-in-the-loop for risky steps.
 - Add:
   - Protocol for actionRequest/actionResponse (approve/deny).

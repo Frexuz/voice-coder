@@ -60,6 +60,15 @@ export default function Home() {
   // Debug: WS status + last event
   const [wsStatus, setWsStatus] = useState<string>("disconnected");
   const [wsLastEvent, setWsLastEvent] = useState<string>("");
+  // Phase 4: Approvals modal state
+  const [pendingAction, setPendingAction] = useState<null | {
+    actionId: string;
+    reason: string;
+    risks: string[];
+    preview: string;
+    timeoutMs?: number;
+    createdAt: number;
+  }>(null);
 
   // Send current terminal size to backend
   const sendResizeNow = useCallback(() => {
@@ -165,6 +174,21 @@ export default function Home() {
                 .map((b) => (typeof b === "string" ? b : JSON.stringify(b)))
                 .filter((s) => typeof s === "string" && s.length > 0);
               setSummaryBullets(bullets);
+            } else if (msg.type === "actionRequest") {
+              const risks: string[] = Array.isArray(msg?.risks)
+                ? (msg.risks as string[])
+                : [];
+              setPendingAction({
+                actionId: String(msg.actionId || ""),
+                reason: String(msg.reason || "approval_required"),
+                risks,
+                preview: String(msg.preview || ""),
+                timeoutMs: Number(msg.timeoutMs || 0) || undefined,
+                createdAt: Date.now(),
+              });
+            } else if (msg.type === "actionResolved") {
+              // Close modal on resolution
+              setPendingAction(null);
             } else if (msg.type === "sessionExit") {
               setPtyRunning(false);
               setPtyOutput((prev) => prev + "\n[session exited]\n");
@@ -446,8 +470,83 @@ export default function Home() {
     setInput("");
   };
 
+  // Phase 4: Send approval decision
+  const sendApproval = (approve: boolean) => {
+    const ws = wsRef.current;
+    const current = pendingAction;
+    if (!current || !ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(
+        JSON.stringify({
+          type: "actionResponse",
+          actionId: current.actionId,
+          approve,
+        })
+      );
+    } catch {}
+  };
+
   return (
     <main className="bg-gray-50 min-h-[100dvh]">
+      {/* Phase 4: Approvals modal */}
+      {pendingAction && (
+        <div className="z-40 fixed inset-0 flex justify-center items-center bg-black/40 p-4">
+          <div className="bg-white shadow-xl border rounded-lg w-full max-w-lg">
+            <div className="px-4 py-3 border-b">
+              <div className="font-semibold text-gray-900 text-base">
+                Approval required
+              </div>
+              <div className="mt-0.5 text-gray-500 text-xs">
+                {pendingAction.reason}
+              </div>
+            </div>
+            <div className="space-y-3 p-4">
+              {pendingAction.risks?.length ? (
+                <div>
+                  <div className="mb-1 font-medium text-gray-600 text-xs">
+                    Risk markers
+                  </div>
+                  <ul className="pl-5 text-gray-700 text-sm list-disc">
+                    {pendingAction.risks.map((r) => (
+                      <li key={r}>{r}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {pendingAction.preview ? (
+                <div>
+                  <div className="mb-1 font-medium text-gray-600 text-xs">
+                    Preview
+                  </div>
+                  <pre className="bg-gray-50 p-2 border rounded max-h-48 overflow-auto text-xs whitespace-pre-wrap">
+                    {pendingAction.preview}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+            <div className="flex justify-end items-center gap-2 bg-gray-50 px-4 py-3 border-t">
+              <button
+                type="button"
+                onClick={() => {
+                  sendApproval(false);
+                  // Optimistically clear; backend also sends actionResolved
+                  setPendingAction(null);
+                }}
+                className="bg-white hover:bg-gray-100 px-3 py-1.5 border rounded text-sm"
+              >
+                Deny
+              </button>
+              <button
+                type="button"
+                onClick={() => sendApproval(true)}
+                className="bg-blue-600 hover:opacity-90 px-3 py-1.5 border border-blue-600 rounded text-white text-sm"
+              >
+                Approve
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Chat container */}
       <div className="flex flex-col mx-auto max-w-md min-h-[100dvh]">
         {/* Header */}

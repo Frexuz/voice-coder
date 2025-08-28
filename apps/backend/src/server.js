@@ -39,6 +39,98 @@ dbg("startup: SSH_AUTH_SOCK", process.env.SSH_AUTH_SOCK || null);
 app.use(cors());
 app.use(express.json());
 
+// --- Phase 4: Approvals and safe actions (config + helpers) ---
+const APPROVAL_ALWAYS =
+  String(process.env.VC_APPROVAL_ALWAYS || "").toLowerCase() === "true" ||
+  process.env.VC_APPROVAL_ALWAYS === "1";
+const APPROVAL_TIMEOUT_MS = Number(process.env.VC_APPROVAL_TIMEOUT_MS || 15000);
+// Comma-separated list of regex fragments or keywords. Defaults cover installs, network, destructive VCS/fs, diff apply.
+const DEFAULT_APPROVAL_PATTERNS = [
+  "\\bgit\\s+apply\\b|^diff --git ",
+  "\\b(pnpm|npm|yarn)\\s+install\\b",
+  "\\b(pip3?|brew|apt(?:-get)?|yum|dnf)\\s+install\\b",
+  "\\b(curl|wget)\\s+https?://",
+  "\\bgit\\s+push\\b|\\bgit\\s+reset\\s+--hard\\b",
+  "\\brm\\s+-rf\\b|\\bchmod\\s+|\\bchown\\s+|\\bsystemctl\\s+",
+  "\\bdocker\\s+(run|pull|push|compose)\\b",
+  "\\bkubectl\\s+apply\\b|\\bhelm\\s+install\\b",
+];
+const APPROVAL_PATTERNS_RAW = process.env.VC_APPROVAL_PATTERNS || "";
+let APPROVAL_PATTERNS = DEFAULT_APPROVAL_PATTERNS;
+try {
+  const items = APPROVAL_PATTERNS_RAW.split(/[,\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (items.length) APPROVAL_PATTERNS = items;
+} catch {}
+const APPROVAL_REGEXES = APPROVAL_PATTERNS.map((p) => new RegExp(p, "i"));
+
+function classifyRiskFromText(text) {
+  const s = String(text || "");
+  const reasons = [];
+  for (const rx of APPROVAL_REGEXES) {
+    if (rx.test(s)) reasons.push(`matches: ${String(rx)}`);
+    if (reasons.length >= 3) break;
+  }
+  if (APPROVAL_ALWAYS && reasons.length === 0) reasons.push("approval_always");
+  return { risky: reasons.length > 0, reasons };
+}
+
+function randomId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function ensureApprovalState(ws) {
+  if (!ws._approvals) {
+    ws._approvals = {
+      pending: new Map(), // actionId -> {resolve, timer}
+    };
+  }
+}
+
+function awaitApproval(ws, req) {
+  // req: { reason, textPreview, risks[]? }
+  ensureApprovalState(ws);
+  const actionId = randomId();
+  const payload = {
+    type: "actionRequest",
+    actionId,
+    reason: req.reason || "approval_required",
+    risks: req.risks || [],
+    preview: String(req.textPreview || "").slice(0, 500),
+    timeoutMs: APPROVAL_TIMEOUT_MS > 0 ? APPROVAL_TIMEOUT_MS : undefined,
+  };
+  send(ws, payload);
+  return new Promise((resolve) => {
+    let timer = null;
+    if (APPROVAL_TIMEOUT_MS > 0) {
+      timer = setTimeout(() => {
+        // auto-deny on timeout
+        try {
+          send(ws, {
+            type: "actionResolved",
+            actionId,
+            approved: false,
+            reason: "timeout",
+          });
+        } catch {}
+        ws._approvals.pending.delete(actionId);
+        resolve(false);
+      }, APPROVAL_TIMEOUT_MS);
+    }
+    ws._approvals.pending.set(actionId, {
+      resolve: (approved) => {
+        if (timer) clearTimeout(timer);
+        try {
+          send(ws, { type: "actionResolved", actionId, approved });
+        } catch {}
+        ws._approvals.pending.delete(actionId);
+        resolve(approved);
+      },
+    });
+  });
+}
+
 app.post("/api/prompt", async (req, res) => {
   const { id, text } = req.body || {};
   if (!text) return res.status(400).json({ error: "missing text" });
@@ -142,6 +234,24 @@ async function handlePrompt(ws, msg) {
     textPreview: String(msg.text).slice(0, 120),
   });
   send(ws, { type: "ack", id: msg.id });
+
+  // Phase 4: Check for risky content and request approval if needed
+  const risk = classifyRiskFromText(msg.text);
+  if (risk.risky) {
+    const approved = await awaitApproval(ws, {
+      reason: "risky_action_detected",
+      risks: risk.reasons,
+      textPreview: msg.text,
+    });
+    if (!approved) {
+      return send(ws, {
+        type: "error",
+        id: msg.id,
+        error: "denied",
+        message: "Action denied (approval required).",
+      });
+    }
+  }
   if (pty.isRunning()) {
     try {
       pty.write(String(msg.text) + "\n");
@@ -244,6 +354,19 @@ wss.on("connection", (ws, req) => {
         case "prompt":
           dbg("ws: prompt received");
           return handlePrompt(ws, msg);
+        case "actionResponse": {
+          // Phase 4: receive approval decision
+          ensureApprovalState(ws);
+          const actionId = String(msg.actionId || "");
+          const approved = !!msg.approve;
+          const entry = ws._approvals.pending.get(actionId);
+          if (entry) {
+            try {
+              entry.resolve(approved);
+            } catch {}
+          }
+          return;
+        }
         case "interrupt":
           dbg("ws: interrupt");
           return handleInterrupt();
