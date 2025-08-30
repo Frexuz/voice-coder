@@ -13,6 +13,7 @@ import {
   summarizeIfChanged,
   summarizerHealth,
   summarizerEngine,
+  summarizeEngine,
 } from "./summarizer_engine.js";
 import { execSync } from "child_process";
 const DEBUG =
@@ -194,6 +195,105 @@ function send(ws, obj) {
   } catch {}
 }
 
+// Helper to get the current raw output buffer (PTY or non-PTY aggregate)
+function getCurrentBuffer(ws) {
+  const fromWs = ws && typeof ws._agg === "string" ? ws._agg : "";
+  const canCheck = pty && typeof pty.isRunning === "function";
+  if (canCheck && pty.isRunning()) {
+    const getBuf = typeof pty.getBuffer === "function" ? pty.getBuffer : null;
+    const buf = getBuf ? getBuf() : "";
+    return typeof buf === "string" && buf.length ? buf : fromWs;
+  }
+  return fromWs;
+}
+
+// --- Phase 6: On-demand expansion (slices) helpers ---
+function extractLatestDiff(buf) {
+  const s = String(buf || "");
+  // Try to find last unified diff starting with 'diff --git' block
+  const matches = [];
+  const rxGit = /^diff --git .*$/gm;
+  for (;;) {
+    const m2 = rxGit.exec(s);
+    if (!m2) break;
+    matches.push(m2.index);
+  }
+  if (matches.length > 0) {
+    const start = matches[matches.length - 1];
+    // End at next diff --git or end of buffer
+    const rest = s.slice(start + 1);
+    const next = rest.search(/^diff --git .*$/m);
+    const end = next === -1 ? s.length : start + 1 + next;
+    return s.slice(start, end).trim();
+  }
+  // Fallback: look for '---' + '+++' headers
+  const rxHdr = /^---\s+.*\n\+\+\+\s+.*$/gm;
+  let last = null;
+  for (;;) {
+    const m2 = rxHdr.exec(s);
+    if (!m2) break;
+    last = m2.index;
+  }
+  if (last != null) {
+    const rest = s.slice(last + 1);
+    const next = rest.search(/^---\s+/m);
+    const end = next === -1 ? s.length : last + 1 + next;
+    return s.slice(last, end).trim();
+  }
+  return "";
+}
+
+function extractFirstTestFailure(buf) {
+  const s = String(buf || "");
+  // Look for common Jest/Vitest failure markers
+  // e.g., "FAIL " line then capture until blank lines or next FAIL/PASS
+  const rxFail = /^(FAIL|✖|x)\b.*$/gim;
+  const m = rxFail.exec(s);
+  if (m) {
+    const start = m.index;
+    const rest = s.slice(start);
+    const next = rest.search(/\n\s*\n|^PASS\b|^FAIL\b|^Test Suites?:/m);
+    const body = next === -1 ? rest : rest.slice(0, next);
+    return body.trim();
+  }
+  // Another hint: lines starting with "●" or "AssertionError"
+  const rxDot = /^\s*[●✖x].*$/gim;
+  const m2 = rxDot.exec(s);
+  if (m2) {
+    const start = m2.index;
+    const rest = s.slice(start);
+    const next = rest.search(/\n\s*\n/);
+    return (next === -1 ? rest : rest.slice(0, next)).trim();
+  }
+  return "";
+}
+
+function extractLastErrorStack(buf) {
+  const s = String(buf || "");
+  // Collect all occurrences of lines starting with 'Error' or containing 'Unhandled' and include subsequent stack lines (' at ')
+  const lines = s.split(/\r?\n/);
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const L = lines[i];
+    if (/\b(Error|Unhandled|Exception)\b/.test(L)) start = i;
+  }
+  if (start === -1) return "";
+  const chunk = [];
+  for (let i = start; i < lines.length; i++) {
+    const L = lines[i];
+    chunk.push(L);
+    // Stop when a blank line after at least one stack frame
+    if (i > start && /^\s*$/.test(L)) break;
+  }
+  // Extend to include following ' at ' frames
+  for (let i = chunk.length; start + i < lines.length; i++) {
+    const L = lines[start + i];
+    if (/^\s+at\s+/.test(L)) chunk.push(L);
+    else break;
+  }
+  return chunk.join("\n").trim();
+}
+
 // Debounced summary scheduler to coalesce rapid output bursts
 function scheduleSummary(ws) {
   try {
@@ -201,7 +301,11 @@ function scheduleSummary(ws) {
     if (!ws._summaryInFlight) {
       ws._summaryInFlight = true;
       try {
-        send(ws, { type: "summaryStatus", running: true });
+        send(ws, {
+          type: "summaryStatus",
+          running: true,
+          correlationId: ws._corr || null,
+        });
       } catch {}
     }
     ws._summaryTimer = setTimeout(async () => {
@@ -211,13 +315,22 @@ function scheduleSummary(ws) {
         const s = await summarizeIfChanged(buf || "", ws._summaryHash || null);
         if (s.changed && s.summary) {
           ws._summaryHash = s.hash;
-          send(ws, { type: "summaryUpdate", summary: s.summary });
+          ws._lastSummary = s.summary;
+          send(ws, {
+            type: "summaryUpdate",
+            correlationId: ws._corr || null,
+            summary: s.summary,
+          });
         }
       } catch {
       } finally {
         ws._summaryInFlight = false;
         try {
-          send(ws, { type: "summaryStatus", running: false });
+          send(ws, {
+            type: "summaryStatus",
+            running: false,
+            correlationId: ws._corr || null,
+          });
         } catch {}
       }
     }, 500);
@@ -277,6 +390,10 @@ async function handlePrompt(ws, msg) {
     textPreview: String(msg.text).slice(0, 120),
   });
   send(ws, { type: "ack", id: msg.id });
+  // Start a new correlation for this prompt (non-PTY flow)
+  ws._corr = String(msg.id || randomId());
+  ws._summaryHash = null;
+  ws._lastSummary = null;
 
   // Phase 4: Check for risky content and request approval if needed
   const risk = classifyRiskFromText(msg.text);
@@ -310,20 +427,57 @@ async function handlePrompt(ws, msg) {
       onStdoutChunk: async (chunk) => {
         ws._agg += String(chunk || "");
         // Stream to client as replyChunk when not using PTY
-        send(ws, { type: "replyChunk", id: msg.id, data: chunk });
+        send(ws, {
+          type: "replyChunk",
+          id: msg.id,
+          correlationId: ws._corr || null,
+          data: chunk,
+        });
         // Debounced summary on new output
         scheduleSummary(ws);
       },
       onStderrChunk: (chunk) => {
         // For visibility, also stream stderr chunks
-        send(ws, { type: "replyChunk", id: msg.id, data: chunk, stderr: true });
+        send(ws, {
+          type: "replyChunk",
+          id: msg.id,
+          correlationId: ws._corr || null,
+          data: chunk,
+          stderr: true,
+        });
       },
     });
     if (result.ok) {
       dbg("ws: ok", { id: msg.id, bytes: result.text?.length || 0 });
-      send(ws, { type: "reply", id: msg.id, text: result.text });
-      // Kick one last summary after command ends
-      scheduleSummary(ws);
+      send(ws, {
+        type: "reply",
+        id: msg.id,
+        correlationId: ws._corr || null,
+        text: result.text,
+      });
+      // Final summary snapshot (force-send, even if identical)
+      try {
+        if (ws._summaryTimer) clearTimeout(ws._summaryTimer);
+      } catch {}
+      ws._summaryInFlight = false;
+      const buf = ws._agg || "";
+      try {
+        const finalSummary = await summarizeEngine(buf);
+        ws._lastSummary = finalSummary || null;
+        send(ws, {
+          type: "summaryFinal",
+          correlationId: ws._corr || null,
+          summary: finalSummary || null,
+        });
+      } catch {}
+      // Ensure status reflects completion
+      try {
+        send(ws, {
+          type: "summaryStatus",
+          running: false,
+          correlationId: ws._corr || null,
+        });
+      } catch {}
     } else {
       dbg("ws: error", {
         id: msg.id,
@@ -338,6 +492,28 @@ async function handlePrompt(ws, msg) {
         message: result.message || "Command failed.",
         preview: result.preview,
       });
+      // Even on error, emit a final snapshot of whatever we captured
+      try {
+        if (ws._summaryTimer) clearTimeout(ws._summaryTimer);
+      } catch {}
+      ws._summaryInFlight = false;
+      const buf = ws._agg || "";
+      try {
+        const finalSummary = await summarizeEngine(buf);
+        ws._lastSummary = finalSummary || null;
+        send(ws, {
+          type: "summaryFinal",
+          correlationId: ws._corr || null,
+          summary: finalSummary || null,
+        });
+      } catch {}
+      try {
+        send(ws, {
+          type: "summaryStatus",
+          running: false,
+          correlationId: ws._corr || null,
+        });
+      } catch {}
     }
   } catch (err) {
     dbg("ws: exception", err?.message || err);
@@ -347,6 +523,28 @@ async function handlePrompt(ws, msg) {
       error: "server_error",
       message: "Unexpected error.",
     });
+    // Exception path: try to finalize too
+    try {
+      if (ws._summaryTimer) clearTimeout(ws._summaryTimer);
+    } catch {}
+    ws._summaryInFlight = false;
+    const buf = ws._agg || "";
+    try {
+      const finalSummary = await summarizeEngine(buf);
+      ws._lastSummary = finalSummary || null;
+      send(ws, {
+        type: "summaryFinal",
+        correlationId: ws._corr || null,
+        summary: finalSummary || null,
+      });
+    } catch {}
+    try {
+      send(ws, {
+        type: "summaryStatus",
+        running: false,
+        correlationId: ws._corr || null,
+      });
+    } catch {}
   }
 }
 
@@ -411,6 +609,63 @@ wss.on("connection", (ws, req) => {
         case "stop":
           dbg("ws: stop");
           return handleStop();
+        case "expandRequest": {
+          // Phase 6: return a requested slice of the current buffer
+          const requestId = String(msg.requestId || randomId());
+          const expandType = String(msg.expandType || "");
+          // params reserved for future filtering (e.g., specific file)
+          const buf = getCurrentBuffer(ws);
+          let content = "";
+          let title = "";
+          let mime = "text/plain";
+          try {
+            if (expandType === "diff") {
+              content = extractLatestDiff(buf);
+              title = "Latest diff";
+              mime = "text/x-diff";
+            } else if (expandType === "first-failure") {
+              content = extractFirstTestFailure(buf);
+              title = "First failing test";
+            } else if (expandType === "last-error") {
+              content = extractLastErrorStack(buf);
+              title = "Last error";
+            } else {
+              return send(ws, {
+                type: "expandResponse",
+                requestId,
+                ok: false,
+                error: "unknown_expand_type",
+                message: `Unknown expandType: ${expandType}`,
+              });
+            }
+            if (!content) {
+              return send(ws, {
+                type: "expandResponse",
+                requestId,
+                ok: false,
+                error: "no_content",
+                message: "No matching content found in buffer.",
+              });
+            }
+            return send(ws, {
+              type: "expandResponse",
+              requestId,
+              ok: true,
+              kind: expandType,
+              title,
+              mime,
+              content,
+            });
+          } catch (e) {
+            return send(ws, {
+              type: "expandResponse",
+              requestId,
+              ok: false,
+              error: "expand_failed",
+              message: String(e?.message || e),
+            });
+          }
+        }
         default:
           return send(ws, { type: "error", message: "unknown message type" });
       }

@@ -91,6 +91,8 @@ Quickstart (local):
   - Adapter stores raw output locally (rolling window) and returns only requested slices.
 - UI:
   - Chips/buttons under summary: “View diff,” “Show first failure,” “Show last error.”
+  - Expo-only path for web/native: use React Native Web; prefer native components for code/diff views, with optional WebView fallback for large files.
+  - Platform overrides via *.web.tsx where helpful; env via EXPO_PUBLIC_* (replaces NEXT_PUBLIC_*).
 - Risks addressed: scalable UX for big outputs, privacy.
 
 [ ] Phase 7 — Basic control plane (single-tenant dev hosting)
@@ -100,7 +102,8 @@ Quickstart (local):
   - Auth-lite: shared secret or device code to pair phone ↔ adapter.
   - Device registry in a simple SQLite/Postgres file.
   - HTTPS via local reverse proxy (Caddy/Traefik) + self-signed or dev CA.
-- Risks addressed: multi-device awareness, basic auth, HTTPS/mic on iOS.
+ - Risks addressed: multi-device awareness, basic auth, HTTPS/mic on iOS.
+ - Note: Next.js frontend paused; Expo Web serves the browser UX.
 
 [ ] Phase 8 — Cloud polish (optional, on-demand)
 - Goal: Better summaries when requested; keep costs negligible.

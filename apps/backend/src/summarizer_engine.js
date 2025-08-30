@@ -41,7 +41,18 @@ export async function summarizeEngine(rawText) {
   if (ENGINE === "llm" || ENGINE === "ollama" || ENGINE === "model") {
     try {
       const r = await summarizeWithLLM(text);
-      if (r && r.summary) return r.summary;
+      if (r && r.summary) {
+        const summary = r.summary;
+        // Merge top-level LLM metrics into the summary's metrics bag for clients to surface
+        try {
+          const m = r.metrics || {};
+          summary.metrics = Object.assign({}, summary.metrics || {}, {
+            model: m.model,
+            durationMs: m.durationMs,
+          });
+        } catch {}
+        return summary;
+      }
     } catch (e) {
       dbg("summarizer_engine: llm failed, falling back", e?.message || e);
     }

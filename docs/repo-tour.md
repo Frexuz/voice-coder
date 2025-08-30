@@ -1,6 +1,6 @@
 # Voice Coder – repo tour
 
-A quick map of the monorepo: where things live, key envs, and how the approval flow works.
+A quick map of the monorepo: where things live, key envs, and how the flow works now (Expo-first, chat bubbles, local LLM summaries).
 
 ## Top-level
 - bun.lock, package.json, turbo.json — workspace + tasks.
@@ -32,18 +32,20 @@ A quick map of the monorepo: where things live, key envs, and how the approval f
   - Commands: `help`, `remember TEXT`, `recall`, `clear`, `time`,
     `install NAME` (fake), `apply-diff` (fake), `network URL` (fake), `exit|quit`.
 
-## Web app (Next.js) – apps/frontend
-- Screen: `apps/frontend/app/page.tsx`
-  - Connects to WS, shows PTY panel + summary.
-  - Approval modal on `actionRequest` → sends `actionResponse`.
-- Env (set via Next public vars):
-  - `NEXT_PUBLIC_BACKEND_WS_URL`, `NEXT_PUBLIC_BACKEND_HTTP_URL`
+## Web app (Next.js)
+- Suspended for now. We run the UI via Expo (native + Expo Web).
+- If you use it, it still connects and renders, but new UX is being built in Expo.
 
 ## Native app (Expo) – apps/native
 - Screen: `apps/native/app/index.tsx`
-  - Connects to WS; same approval/streaming protocol as web.
-  - Keyboard auto-dismiss when approval modal opens.
-- Env (set via Expo public vars):
+  - Chat-bubble UX:
+    - Your message (right), inline approval bubble (right), assistant bubble (left).
+    - Assistant shows a spinner only after you approve (if required).
+    - Each turn produces a new assistant bubble, even when content is identical.
+  - Inline approvals: Approve/Deny buttons appear inside your bubble.
+  - Terminal panel: does not auto-open on non-PTY runs; you can toggle it.
+  - Model chip + duration: summary bubble shows model (or engine) and a tiny duration once final.
+- Env (Expo public vars):
   - `EXPO_PUBLIC_BACKEND_WS_URL`, `EXPO_PUBLIC_BACKEND_HTTP_URL`
 - Default WS/HTTP host if no env: `192.168.0.100` (adjust for your LAN)
 
@@ -52,8 +54,12 @@ A quick map of the monorepo: where things live, key envs, and how the approval f
   - `hello`, `prompt {id,text}`, `startSession {options}`, `interrupt`, `stop`, `resize {cols,rows}`
   - Approvals: `actionResponse {actionId, approve}`
 - Server → client:
-  - `ack`, `reply`, `replyChunk`, `output` (PTY), `summaryUpdate`, `sessionStarted`, `sessionExit`, `error`
+  - `ack`, `reply`, `replyChunk`, `output` (PTY), `summaryStatus {running, correlationId}`, `summaryUpdate {summary, correlationId}`, `summaryFinal {summary, correlationId}`, `sessionStarted`, `sessionExit`, `error`
   - Approvals: `actionRequest {actionId, reason, risks[], preview, timeoutMs?}` then `actionResolved {actionId, approved}`
+
+Notes:
+- correlationId: carried across status/update/final per prompt. Final is always emitted (even if identical) to avoid stuck spinners.
+- Non-PTY runs stream `replyChunk`; summaries are debounced mid-stream only.
 
 ## Approvals 101
 - Triggered only for chat prompts (not PTY keystrokes).
@@ -64,7 +70,11 @@ A quick map of the monorepo: where things live, key envs, and how the approval f
 
 ## Typical dev loop
 - Backend: run with Bun (loads `.env.local` in `apps/backend/`).
-- Point clients to the backend (WS/HTTP URLs) via public envs.
-- Send a risky prompt (e.g., `diff --git a/a b/b`, `npm install foo`) → approval modal.
+- Point Expo (native/web) to the backend via `EXPO_PUBLIC_*` envs.
+- If approvals trigger, spinner appears only after you press Approve.
+- Summaries: mid-stream `summaryUpdate` + guaranteed `summaryFinal` when the run ends.
+
+## Bun, not npm
+- Use Bun for scripts and installs in this repo.
 
 See also: `docs/phases.md` (roadmap + phase notes).

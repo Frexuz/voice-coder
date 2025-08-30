@@ -37,6 +37,11 @@
       "dependsOn": ["^build"],
       "cache": false,
       "persistent": true
+    },
+    "web": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "persistent": true
     }
   }
 }

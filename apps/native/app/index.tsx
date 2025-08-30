@@ -6,7 +6,6 @@ import {
   StyleSheet,
   Text,
   View,
-  Pressable,
   Keyboard,
 } from "react-native";
 import Animated, {
@@ -96,37 +95,26 @@ function getHTTPBase(): string {
 }
 
 // Strip ANSI escape sequences and normalize carriage returns for display
-function sanitizeAnsi(input: string): string {
-  const s = input.replace(/\r(?!\n)/g, "\n");
-  let out = "";
-  let idx = 0;
-  while (idx < s.length) {
-    const esc = s.indexOf("\u001b[", idx);
-    if (esc === -1) {
-      out += s.slice(idx);
-      break;
-    }
-    out += s.slice(idx, esc);
-    // advance to the end of the CSI sequence (final byte in @-~)
-    let k = esc + 2;
-    while (k < s.length) {
-      const c = s.charCodeAt(k);
-      if (c >= 0x40 && c <= 0x7e) {
-        k += 1; // include the final byte
-        break;
-      }
-      k += 1;
-    }
-    idx = k;
-  }
-  return out;
-}
+// sanitizeAnsi previously used for terminal panel; unused in chat flow now
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<Status>("idle");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Track the current assistant summary bubble id (if any)
+  const summaryMsgIdRef = useRef<string | null>(null);
+  // Track the current approval bubble id (user-side)
+  const approvalMsgIdRef = useRef<string | null>(null);
+  // Unique message id generator (monotonic within session)
+  const idPrefixRef = useRef<string>(Math.random().toString(36).slice(2));
+  const idSeqRef = useRef<number>(0);
+  const newMsgIdRef = useRef<() => string>(() => "");
+  newMsgIdRef.current = () => {
+    idSeqRef.current += 1;
+    return `m-${idPrefixRef.current}-${idSeqRef.current}`;
+  };
+  const newMsgId = () => newMsgIdRef.current();
   const [ptyRunning, setPtyRunning] = useState(false);
   const [showPty, setShowPty] = useState(false);
   const [ptyOutput, setPtyOutput] = useState("");
@@ -164,6 +152,10 @@ export default function HomeScreen() {
     timeoutMs?: number;
     createdAt: number;
   }>(null);
+  const pendingActionRef = useRef<typeof pendingAction>(null);
+  useEffect(() => {
+    pendingActionRef.current = pendingAction;
+  }, [pendingAction]);
   const messagesScrollRef = useRef<ScrollView | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const connectRef = useRef<(() => void) | null>(null);
@@ -245,31 +237,93 @@ export default function HomeScreen() {
               case "ack":
                 setStatus("waiting");
                 break;
-              case "summaryStatus":
-                setIsSummarizing(Boolean(rawObj.running));
+              case "summaryStatus": {
+                const running = Boolean(rawObj.running);
+                setIsSummarizing(running);
+                if (running) {
+                  // Don't show spinner until after approval has been decided
+                  if (pendingActionRef.current) {
+                    break;
+                  }
+                  // Insert a pending assistant bubble (or keep existing pending one).
+                  // If an old id exists but points to a resolved message, create a new one.
+                  setMessages((prev) => {
+                    const curId = summaryMsgIdRef.current;
+                    if (curId) {
+                      const idx = prev.findIndex((m) => m.id === curId);
+                      if (idx !== -1) {
+                        const cur = prev[idx];
+                        if (
+                          cur.pending ||
+                          !cur.text ||
+                          cur.text.trim().length === 0
+                        ) {
+                          const next = [...prev];
+                          next[idx] = { ...cur, pending: true };
+                          return next;
+                        }
+                        // Existing bubble already resolved with content; start a fresh one
+                      }
+                    }
+                    const id = newMsgIdRef.current();
+                    summaryMsgIdRef.current = id;
+                    return [
+                      ...prev,
+                      { id, role: "assistant", text: "", pending: true },
+                    ];
+                  });
+                } else {
+                  // Summarization completed. If we still have a pending bubble and no content was set,
+                  // finalize it by copying the last assistant message if available (so duplicate answers show),
+                  // otherwise use a neutral placeholder.
+                  setMessages((prev) => {
+                    const id = summaryMsgIdRef.current;
+                    if (!id) return prev;
+                    const idx = prev.findIndex((m) => m.id === id);
+                    if (idx === -1) return prev;
+                    const msg = prev[idx];
+                    if (!msg.pending) return prev; // already resolved by summaryUpdate
+                    let text = (msg.text || "").trim();
+                    if (!text) {
+                      // find last non-pending assistant message before this one
+                      let prior = "";
+                      for (let i = idx - 1; i >= 0; i--) {
+                        const m = prev[i];
+                        if (
+                          m.role === "assistant" &&
+                          !m.pending &&
+                          m.id !== id
+                        ) {
+                          const t = (m.text || "").trim();
+                          if (t) {
+                            prior = t;
+                            break;
+                          }
+                        }
+                      }
+                      text = prior || "(no changes)";
+                    }
+                    const next = [...prev];
+                    next[idx] = { ...msg, pending: false, text };
+                    return next;
+                  });
+                }
                 break;
-              case "reply":
+              }
+
+              case "reply": {
                 setStatus("done");
-                setMessages((prev) => [
-                  ...prev,
-                  {
-                    id:
-                      (typeof rawObj.id === "string" ? rawObj.id : undefined) ||
-                      Math.random().toString(36).slice(2),
-                    role: "assistant",
-                    text: safeToString(rawObj.text),
-                  },
-                ]);
-                break;
-              case "sessionStarted":
-                setPtyRunning(Boolean(rawObj.running));
-                setShowPty(true);
-                break;
-              case "output":
-              case "replyChunk": {
-                const chunk = safeToString(rawObj.data ?? "");
-                setPtyOutput((prev) => prev + sanitizeAnsi(chunk));
-                setShowPty(true);
+                // If a summary bubble is active, keep spinner and wait for summaryUpdate/summaryFinal.
+                if (!summaryMsgIdRef.current) {
+                  const replyText = safeToString(rawObj.text);
+                  const replyId =
+                    (typeof rawObj.id === "string" ? rawObj.id : undefined) ||
+                    newMsgId();
+                  setMessages((prev) => [
+                    ...prev,
+                    { id: replyId, role: "assistant", text: replyText },
+                  ]);
+                }
                 break;
               }
               case "summaryUpdate": {
@@ -283,6 +337,64 @@ export default function HomeScreen() {
                   setSummaryBullets(
                     toStringArray(arr).filter((v) => v.length > 0)
                   );
+                  // Render/update summary in chat bubble
+                  let text = toStringArray(arr)
+                    .filter((v) => v.length > 0)
+                    .map((b) => `• ${b}`)
+                    .join("\n");
+                  if (!text) {
+                    // Fallback: synthesize a compact summary from tests/files/errors
+                    const lines: string[] = [];
+                    const sObj = s as typeof summaryObj;
+                    if (
+                      sObj?.tests &&
+                      (sObj.tests.passed || sObj.tests.failed)
+                    ) {
+                      lines.push(
+                        `Tests: ${sObj.tests.passed ?? 0}✓/${sObj.tests.failed ?? 0}✗`
+                      );
+                    }
+                    if (
+                      Array.isArray(sObj?.filesChanged) &&
+                      sObj.filesChanged.length > 0
+                    ) {
+                      lines.push(`Files changed: ${sObj.filesChanged.length}`);
+                    }
+                    if (Array.isArray(sObj?.errors) && sObj.errors.length > 0) {
+                      const first = sObj.errors[0];
+                      lines.push(
+                        `Errors: ${sObj.errors.length}${first?.message ? ` — ${first.message}` : ""}`
+                      );
+                    }
+                    text = lines.join("\n");
+                    if (!text) text = "(no summary details)";
+                  }
+                  setMessages((prev) => {
+                    const id = summaryMsgIdRef.current || newMsgIdRef.current();
+                    summaryMsgIdRef.current = id;
+                    const exists = prev.some((m) => m.id === id);
+                    const headerChip =
+                      health?.engine === "llm" && health?.model
+                        ? health.model
+                        : undefined;
+                    if (exists) {
+                      return prev.map((m) =>
+                        m.id === id
+                          ? { ...m, pending: false, text, headerChip }
+                          : m
+                      );
+                    }
+                    return [
+                      ...prev,
+                      {
+                        id,
+                        role: "assistant",
+                        text,
+                        pending: false,
+                        headerChip,
+                      },
+                    ];
+                  });
                 } else {
                   setSummaryObj(null);
                   const summaryMaybe = (rawObj as Record<string, unknown>)
@@ -294,6 +406,145 @@ export default function HomeScreen() {
                     toStringArray(arr).filter((v) => v.length > 0)
                   );
                 }
+                break;
+              }
+              case "summaryFinal": {
+                const s = rawObj.summary as typeof summaryObj;
+                if (s && typeof s === "object") {
+                  setSummaryObj(s);
+                  type SummaryMetrics = { model?: string; durationMs?: number };
+                  const metrics: SummaryMetrics | undefined = (
+                    s as { metrics?: SummaryMetrics }
+                  ).metrics;
+                  const bullets = (s as Record<string, unknown>).bullets;
+                  const arr = Array.isArray(bullets)
+                    ? (bullets as unknown[])
+                    : [];
+                  const bulletLines = toStringArray(arr).filter(
+                    (v) => v.length > 0
+                  );
+                  setSummaryBullets(bulletLines);
+                  let text = bulletLines.map((b) => `• ${b}`).join("\n");
+                  if (!text) {
+                    const lines: string[] = [];
+                    const sObj = s as typeof summaryObj;
+                    if (
+                      sObj?.tests &&
+                      (sObj.tests.passed || sObj.tests.failed)
+                    ) {
+                      lines.push(
+                        `Tests: ${sObj.tests.passed ?? 0}✓/${sObj.tests.failed ?? 0}✗`
+                      );
+                    }
+                    if (
+                      Array.isArray(sObj?.filesChanged) &&
+                      sObj.filesChanged.length > 0
+                    ) {
+                      lines.push(`Files changed: ${sObj.filesChanged.length}`);
+                    }
+                    if (Array.isArray(sObj?.errors) && sObj.errors.length > 0) {
+                      const first = sObj.errors[0];
+                      lines.push(
+                        `Errors: ${sObj.errors.length}${first?.message ? ` — ${first.message}` : ""}`
+                      );
+                    }
+                    text = lines.join("\n");
+                    if (!text) text = "(no summary details)";
+                  }
+                  setMessages((prev) => {
+                    const id = summaryMsgIdRef.current || newMsgIdRef.current();
+                    summaryMsgIdRef.current = id;
+                    const exists = prev.some((m) => m.id === id);
+                    const headerChip = metrics?.model
+                      ? metrics.model
+                      : health?.engine
+                        ? String(health.engine)
+                        : undefined;
+                    const footer = Number.isFinite(Number(metrics?.durationMs))
+                      ? `${Math.round(Number(metrics?.durationMs))} ms`
+                      : undefined;
+                    // Add expansion chips based on summary details
+                    const expansions: {
+                      kind: "diff" | "first-failure" | "last-error";
+                      label: string;
+                    }[] = [];
+                    const sObj = s as typeof summaryObj;
+                    if (
+                      Array.isArray(sObj?.filesChanged) &&
+                      sObj.filesChanged.length > 0
+                    ) {
+                      expansions.push({ kind: "diff", label: "View diff" });
+                    }
+                    const failedCount = sObj?.tests?.failed ?? 0;
+                    const failuresArr = Array.isArray(sObj?.tests?.failures)
+                      ? (sObj?.tests?.failures as unknown[])
+                      : [];
+                    if (failedCount > 0 || failuresArr.length > 0) {
+                      expansions.push({
+                        kind: "first-failure",
+                        label: "Show first failure",
+                      });
+                    }
+                    if (Array.isArray(sObj?.errors) && sObj.errors.length > 0) {
+                      expansions.push({
+                        kind: "last-error",
+                        label: "Show last error",
+                      });
+                    }
+                    const patch = {
+                      pending: false,
+                      text,
+                      headerChip,
+                      footer,
+                      expansions: expansions.length ? expansions : undefined,
+                    } as const;
+                    if (exists) {
+                      return prev.map((m) =>
+                        m.id === id ? { ...m, ...patch } : m
+                      );
+                    }
+                    return [...prev, { id, role: "assistant", ...patch }];
+                  });
+                }
+                break;
+              }
+              case "expandResponse": {
+                const ok = Boolean(rawObj.ok);
+                const content = isString(
+                  (rawObj as { content?: unknown }).content
+                )
+                  ? String((rawObj as { content?: unknown }).content)
+                  : "";
+                const title = isString((rawObj as { title?: unknown }).title)
+                  ? String((rawObj as { title?: unknown }).title)
+                  : undefined;
+                const kind = isString((rawObj as { kind?: unknown }).kind)
+                  ? String((rawObj as { kind?: unknown }).kind)
+                  : undefined;
+                if (!ok) {
+                  const msg = isString(
+                    (rawObj as { message?: unknown }).message
+                  )
+                    ? String((rawObj as { message?: unknown }).message)
+                    : "No content";
+                  setMessages((prev) => [
+                    ...prev,
+                    { id: newMsgId(), role: "assistant", text: msg },
+                  ]);
+                  break;
+                }
+                const label = title || (kind ? `Slice: ${kind}` : undefined);
+                const id = newMsgId();
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    role: "assistant",
+                    text: content || "(empty)",
+                    mono: true,
+                    headerChip: label,
+                  },
+                ]);
                 break;
               }
               case "sessionExit":
@@ -311,13 +562,7 @@ export default function HomeScreen() {
                     : "Error");
                 setMessages((prev) => [
                   ...prev,
-                  {
-                    id:
-                      (typeof rawObj.id === "string" ? rawObj.id : undefined) ||
-                      Math.random().toString(36).slice(2),
-                    role: "assistant",
-                    text,
-                  },
+                  { id: newMsgId(), role: "assistant", text },
                 ]);
                 break;
               }
@@ -325,7 +570,7 @@ export default function HomeScreen() {
                 const risks: string[] = Array.isArray(rawObj?.risks)
                   ? (rawObj.risks as string[])
                   : [];
-                setPendingAction({
+                const nextPending = {
                   actionId:
                     typeof rawObj.actionId === "string"
                       ? String(rawObj.actionId)
@@ -341,7 +586,115 @@ export default function HomeScreen() {
                       ? Number(rawObj.timeoutMs)
                       : undefined,
                   createdAt: Date.now(),
-                });
+                };
+                setPendingAction(nextPending);
+                // Render approval bubble on the right (user)
+                const id = newMsgIdRef.current();
+                approvalMsgIdRef.current = id;
+                const lines: string[] = [
+                  `Approval required: ${nextPending.reason}`,
+                ];
+                if (nextPending.risks?.length) {
+                  lines.push(`Risks: ${nextPending.risks.join(", ")}`);
+                }
+                const text = lines.join("\n");
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id,
+                    role: "user",
+                    text,
+                    actions: {
+                      approveLabel: "Approve",
+                      denyLabel: "Deny",
+                      onApprove: () => {
+                        // Optimistically update bubble to remove actions
+                        setMessages((prev2) =>
+                          prev2.map((m) =>
+                            m.id === id
+                              ? {
+                                  ...m,
+                                  actions: null,
+                                  text: `${text}\n— Approved`,
+                                }
+                              : m
+                          )
+                        );
+                        // Send approval
+                        const ws = wsRef.current;
+                        if (
+                          ws &&
+                          ws.readyState === WebSocket.OPEN &&
+                          nextPending.actionId
+                        ) {
+                          try {
+                            ws.send(
+                              JSON.stringify({
+                                type: "actionResponse",
+                                actionId: nextPending.actionId,
+                                approve: true,
+                              })
+                            );
+                          } catch {}
+                        }
+                        // Ensure a pending assistant bubble is visible immediately after approval
+                        setMessages((prev3) => {
+                          const curId = summaryMsgIdRef.current;
+                          if (curId) {
+                            const idx = prev3.findIndex((m) => m.id === curId);
+                            if (idx !== -1) {
+                              const cur = prev3[idx];
+                              if (cur.pending) return prev3;
+                              const next = [...prev3];
+                              next[idx] = { ...cur, pending: true };
+                              return next;
+                            }
+                          }
+                          const newId = newMsgIdRef.current();
+                          summaryMsgIdRef.current = newId;
+                          return [
+                            ...prev3,
+                            {
+                              id: newId,
+                              role: "assistant",
+                              text: "",
+                              pending: true,
+                            },
+                          ];
+                        });
+                      },
+                      onDeny: () => {
+                        setMessages((prev2) =>
+                          prev2.map((m) =>
+                            m.id === id
+                              ? {
+                                  ...m,
+                                  actions: null,
+                                  text: `${text}\n— Denied`,
+                                }
+                              : m
+                          )
+                        );
+                        const ws = wsRef.current;
+                        if (
+                          ws &&
+                          ws.readyState === WebSocket.OPEN &&
+                          nextPending.actionId
+                        ) {
+                          try {
+                            ws.send(
+                              JSON.stringify({
+                                type: "actionResponse",
+                                actionId: nextPending.actionId,
+                                approve: false,
+                              })
+                            );
+                          } catch {}
+                        }
+                      },
+                    },
+                  },
+                ]);
                 break;
               }
               case "actionResolved":
@@ -384,6 +737,7 @@ export default function HomeScreen() {
   }, []);
 
   const lastCountRef = useRef(0);
+
   useEffect(() => {
     if (messages.length !== lastCountRef.current) {
       lastCountRef.current = messages.length;
@@ -396,8 +750,10 @@ export default function HomeScreen() {
 
   const sendPrompt = useCallback(async (text: string) => {
     setStatus("sending");
-    const id = Math.random().toString(36).slice(2);
+    const id = newMsgIdRef.current();
     setMessages((prev) => [...prev, { id, role: "user", text }]);
+    // New user turn: ensure a fresh assistant bubble will be created
+    summaryMsgIdRef.current = null;
 
     const ws = wsRef.current;
 
@@ -425,7 +781,7 @@ export default function HomeScreen() {
           setMessages((prev) => [
             ...prev,
             {
-              id: Math.random().toString(36).slice(2),
+              id: newMsgIdRef.current(),
               role: "assistant",
               text: obj.text as string,
             },
@@ -439,11 +795,7 @@ export default function HomeScreen() {
           "Request failed";
         setMessages((prev) => [
           ...prev,
-          {
-            id: Math.random().toString(36).slice(2),
-            role: "assistant",
-            text: String(msg),
-          },
+          { id: newMsgIdRef.current(), role: "assistant", text: String(msg) },
         ]);
       } catch (e: unknown) {
         setStatus("error");
@@ -453,11 +805,7 @@ export default function HomeScreen() {
             : "Network error";
         setMessages((prev) => [
           ...prev,
-          {
-            id: Math.random().toString(36).slice(2),
-            role: "assistant",
-            text: msg,
-          },
+          { id: newMsgIdRef.current(), role: "assistant", text: msg },
         ]);
       }
     };
@@ -494,23 +842,7 @@ export default function HomeScreen() {
     setInput("");
   }, [input, sendPrompt]);
 
-  // Phase 4: Send approval decision
-  const sendApproval = useCallback(
-    (approve: boolean) => {
-      const ws = wsRef.current;
-      if (!pendingAction || !ws || ws.readyState !== WebSocket.OPEN) return;
-      try {
-        ws.send(
-          JSON.stringify({
-            type: "actionResponse",
-            actionId: pendingAction.actionId,
-            approve,
-          })
-        );
-      } catch {}
-    },
-    [pendingAction]
-  );
+  // Approval handled inline via chat bubble actions
 
   const statusText = useMemo(
     () =>
@@ -529,57 +861,7 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.safe} edges={["top", "left", "right"]}>
       <StatusBar style="light" />
       <View style={styles.container}>
-        {/* Approval Modal */}
-        {pendingAction ? (
-          <View style={styles.modalOverlay} pointerEvents="box-none">
-            <View style={styles.modalCard}>
-              <Text style={styles.modalTitle}>Approval required</Text>
-              <Text style={styles.modalSub}>
-                {pendingAction.reason || "approval_required"}
-              </Text>
-              {pendingAction.risks?.length ? (
-                <View style={{ marginTop: 8 }}>
-                  <Text style={styles.sectionLabel}>Risk markers</Text>
-                  <View style={{ gap: 4, marginTop: 4 }}>
-                    {pendingAction.risks.map((r) => (
-                      <Text key={r} style={styles.riskItem}>{`• ${r}`}</Text>
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-              {pendingAction.preview ? (
-                <View style={{ marginTop: 10 }}>
-                  <Text style={styles.sectionLabel}>Preview</Text>
-                  <ScrollView
-                    style={styles.previewBox}
-                    contentContainerStyle={{ padding: 8 }}
-                  >
-                    <Text style={styles.previewText}>
-                      {pendingAction.preview}
-                    </Text>
-                  </ScrollView>
-                </View>
-              ) : null}
-              <View style={styles.modalRow}>
-                <Pressable
-                  onPress={() => {
-                    sendApproval(false);
-                    setPendingAction(null);
-                  }}
-                  style={[styles.modalBtn, styles.modalBtnNeutral]}
-                >
-                  <Text style={styles.modalBtnNeutralText}>Deny</Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => sendApproval(true)}
-                  style={[styles.modalBtn, styles.modalBtnPrimary]}
-                >
-                  <Text style={styles.modalBtnPrimaryText}>Approve</Text>
-                </Pressable>
-              </View>
-            </View>
-          </View>
-        ) : null}
+        {/* Approval modal removed: approvals now appear inline as chat bubble */}
         {/* Terminal fixed at the top (outside chat scroll) */}
         <View style={{ paddingHorizontal: 16, paddingTop: 12 }}>
           <TerminalPanel
@@ -640,7 +922,23 @@ export default function HomeScreen() {
             messagesScrollRef.current?.scrollToEnd({ animated: true })
           }
         >
-          <ChatBubbles messages={messages} />
+          <ChatBubbles
+            messages={messages}
+            onExpand={(kind) => {
+              const ws = wsRef.current;
+              if (!ws || ws.readyState !== WebSocket.OPEN) return;
+              const requestId = newMsgIdRef.current();
+              try {
+                ws.send(
+                  JSON.stringify({
+                    type: "expandRequest",
+                    requestId,
+                    expandType: kind,
+                  })
+                );
+              } catch {}
+            }}
+          />
         </ScrollView>
         {/* Composer bar with OS-synced keyboard animation */}
         <AnimatedComposer
