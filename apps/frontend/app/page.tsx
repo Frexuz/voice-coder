@@ -21,6 +21,15 @@ function getWSUrl() {
   return `${proto}://${host}:4001/ws`;
 }
 
+function getHTTPBase() {
+  if (typeof window === "undefined") return "";
+  const override = process.env.NEXT_PUBLIC_BACKEND_HTTP_URL;
+  if (override) return override;
+  const host = window.location.hostname;
+  const proto = window.location.protocol;
+  return `${proto}//${host}:4001`;
+}
+
 export default function Home() {
   const [status, setStatus] = useState<Status>("idle");
   const [input, setInput] = useState<string>("");
@@ -50,6 +59,19 @@ export default function Home() {
   const [ptyRunning, setPtyRunning] = useState<boolean>(false);
   const [ptyOutput, setPtyOutput] = useState<string>("");
   const [summaryBullets, setSummaryBullets] = useState<string[]>([]);
+  const [summaryObj, setSummaryObj] = useState<null | {
+    version?: string;
+    bullets?: string[];
+    filesChanged?: { path: string; adds?: number; dels?: number }[];
+    tests?: {
+      passed?: number;
+      failed?: number;
+      failures?: { name?: string; message?: string }[];
+    };
+    errors?: { type?: string; message?: string }[];
+    actions?: string[];
+    metrics?: { durationMs?: number; commandsRun?: number; exitCode?: number };
+  }>(null);
   const ptyRef = useRef<HTMLDivElement | null>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -69,6 +91,15 @@ export default function Home() {
     timeoutMs?: number;
     createdAt: number;
   }>(null);
+  const [health, setHealth] = useState<null | {
+    engine?: string;
+    ok?: boolean;
+    server?: boolean;
+    model?: string;
+    hasModel?: boolean;
+    error?: string;
+  }>(null);
+  const [isSummarizing, setIsSummarizing] = useState(false);
 
   // Send current terminal size to backend
   const sendResizeNow = useCallback(() => {
@@ -123,6 +154,18 @@ export default function Home() {
           try {
             socket.send(JSON.stringify({ type: "hello" }));
           } catch {}
+          // Fetch summarizer health once on open
+          try {
+            const base = getHTTPBase();
+            if (base) {
+              fetch(`${base}/api/summarizer/health`)
+                .then((r) => r.json())
+                .then((j) => setHealth(j))
+                .catch(() => setHealth({ ok: false }));
+            }
+          } catch {
+            setHealth({ ok: false });
+          }
           // If user clicked Start during connect, send it now
           if (pendingStartRef.current) {
             try {
@@ -149,6 +192,8 @@ export default function Home() {
             console.log("[vc-fe] ws: message", msg);
             if (msg.type === "ack") {
               setStatus("waiting");
+            } else if (msg.type === "summaryStatus") {
+              setIsSummarizing(!!msg.running);
             } else if (msg.type === "reply") {
               setStatus("done");
               setMessages((prev) => [
@@ -167,13 +212,26 @@ export default function Home() {
               setPtyOutput((prev) => prev + String(msg.data || ""));
               setShowPty(true);
             } else if (msg.type === "summaryUpdate") {
-              const arr = Array.isArray(msg?.summary?.bullets)
-                ? (msg.summary.bullets as unknown[])
-                : [];
-              const bullets: string[] = arr
-                .map((b) => (typeof b === "string" ? b : JSON.stringify(b)))
-                .filter((s) => typeof s === "string" && s.length > 0);
-              setSummaryBullets(bullets);
+              const sum = msg?.summary ?? null;
+              if (sum && typeof sum === "object") {
+                setSummaryObj(sum);
+                const arr = Array.isArray(sum?.bullets)
+                  ? (sum.bullets as unknown[])
+                  : [];
+                const bullets: string[] = arr
+                  .map((b) => (typeof b === "string" ? b : JSON.stringify(b)))
+                  .filter((s) => typeof s === "string" && s.length > 0);
+                setSummaryBullets(bullets);
+              } else {
+                setSummaryObj(null);
+                const arr = Array.isArray(msg?.summary?.bullets)
+                  ? (msg.summary.bullets as unknown[])
+                  : [];
+                const bullets: string[] = arr
+                  .map((b) => (typeof b === "string" ? b : JSON.stringify(b)))
+                  .filter((s) => typeof s === "string" && s.length > 0);
+                setSummaryBullets(bullets);
+              }
             } else if (msg.type === "actionRequest") {
               const risks: string[] = Array.isArray(msg?.risks)
                 ? (msg.risks as string[])
@@ -714,10 +772,31 @@ export default function Home() {
             {showPty && (
               <div className="gap-2 grid grid-cols-1 md:grid-cols-2 mt-2">
                 <div className="bg-white border rounded-md overflow-hidden">
-                  <div className="px-2 py-1 border-b font-semibold text-gray-600 text-xs">
-                    Summary
+                  <div className="flex justify-between items-center px-2 py-1 border-b font-semibold text-gray-600 text-xs">
+                    <span>Summary</span>
+                    {isSummarizing ? (
+                      <span className="inline-block border-2 border-gray-300 border-t-transparent rounded-full w-3 h-3 animate-spin" />
+                    ) : null}
                   </div>
                   <div className="px-3 py-2 text-gray-800 text-sm">
+                    {health ? (
+                      <div className="mb-2 text-[10px] text-gray-500">
+                        Engine: {String(health.engine || "?")}
+                        {typeof health.ok === "boolean" ? (
+                          <span>
+                            {health.ok ? " • healthy" : " • unhealthy"}
+                          </span>
+                        ) : null}
+                        {typeof health.hasModel === "boolean" ? (
+                          <span>
+                            {health.hasModel
+                              ? " • model ready"
+                              : " • model missing"}
+                          </span>
+                        ) : null}
+                        {health.model ? ` • ${health.model}` : ""}
+                      </div>
+                    ) : null}
                     {summaryBullets.length === 0 ? (
                       <div className="text-gray-400 text-xs">
                         No summary yet…
@@ -731,6 +810,104 @@ export default function Home() {
                         ))}
                       </ul>
                     )}
+                    {summaryObj ? (
+                      <div className="mt-2">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          {Array.isArray(summaryObj.filesChanged) &&
+                          summaryObj.filesChanged.length > 0 ? (
+                            <span className="bg-gray-100 px-2 py-0.5 border rounded">
+                              Files: {summaryObj.filesChanged.length}
+                            </span>
+                          ) : null}
+                          {summaryObj.tests &&
+                          (summaryObj.tests.passed ||
+                            summaryObj.tests.failed) ? (
+                            <span className="bg-gray-100 px-2 py-0.5 border rounded">
+                              Tests: {summaryObj.tests.passed ?? 0}✓/
+                              {summaryObj.tests.failed ?? 0}✗
+                            </span>
+                          ) : null}
+                          {Array.isArray(summaryObj.errors) &&
+                          summaryObj.errors.length > 0 ? (
+                            <span className="bg-gray-100 px-2 py-0.5 border rounded">
+                              Errors: {summaryObj.errors.length}
+                            </span>
+                          ) : null}
+                          {summaryObj.metrics &&
+                          typeof summaryObj.metrics.durationMs === "number" ? (
+                            <span className="bg-gray-100 px-2 py-0.5 border rounded">
+                              Duration:{" "}
+                              {Math.round(
+                                (summaryObj.metrics.durationMs || 0) / 1000
+                              )}
+                              s
+                            </span>
+                          ) : null}
+                        </div>
+                        {Array.isArray(summaryObj.filesChanged) &&
+                        summaryObj.filesChanged.length > 0 ? (
+                          <div className="mt-2 pt-2 border-t">
+                            <div className="mb-1 font-medium text-gray-600 text-xs">
+                              Files changed
+                            </div>
+                            <ul className="pl-5 text-xs list-disc">
+                              {summaryObj.filesChanged.slice(0, 5).map((f) => (
+                                <li key={f.path}>
+                                  {f.path}
+                                  {typeof f.adds === "number" ||
+                                  typeof f.dels === "number" ? (
+                                    <span className="text-gray-500">
+                                      {" "}
+                                      ({f.adds ?? 0}+/{f.dels ?? 0}-)
+                                    </span>
+                                  ) : null}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {summaryObj.tests &&
+                        Array.isArray(summaryObj.tests.failures) &&
+                        summaryObj.tests.failures.length > 0 ? (
+                          <div className="mt-2 pt-2 border-t">
+                            <div className="mb-1 font-medium text-gray-600 text-xs">
+                              Test failures
+                            </div>
+                            <ul className="pl-5 text-xs list-disc">
+                              {summaryObj.tests.failures
+                                .slice(0, 3)
+                                .map((t) => (
+                                  <li
+                                    key={
+                                      (t.name || "") + ":" + (t.message || "")
+                                    }
+                                  >
+                                    {t.name || "(unnamed)"}: {t.message || ""}
+                                  </li>
+                                ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {Array.isArray(summaryObj.errors) &&
+                        summaryObj.errors.length > 0 ? (
+                          <div className="mt-2 pt-2 border-t">
+                            <div className="mb-1 font-medium text-gray-600 text-xs">
+                              Errors
+                            </div>
+                            <ul className="pl-5 text-xs list-disc">
+                              {summaryObj.errors.slice(0, 3).map((e) => (
+                                <li
+                                  key={(e.type || "") + ":" + (e.message || "")}
+                                >
+                                  {e.type ? `${e.type}: ` : ""}
+                                  {e.message || ""}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                   </div>
                 </div>
                 <div className="bg-black border rounded-md overflow-hidden">

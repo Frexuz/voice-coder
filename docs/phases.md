@@ -54,7 +54,7 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
   - Deny path halts correctly; approve path proceeds; timeouts auto-deny.
 - Risks addressed: safety, trust.
 
-[ ] Phase 5 — Local summarizer model (map-reduce)
+- [x] Phase 5 — Local summarizer model (map-reduce)
 - Goal: Quality summaries without cloud.
 - Add:
   - Ollama or llama.cpp with a 3B–7B quantized model (Qwen2.5-3B Q4 or Mistral 7B Q4).
@@ -63,6 +63,26 @@ Great plan. Here’s a staged roadmap from PoC to external-tester v1, adding one
 - Operational:
   - Download/initialize model on first run; healthcheck; telemetry: tokens, latency.
 - Risks addressed: model packaging, latency on average hardware.
+
+Implementation notes (done):
+- Backend now supports a local LLM summarizer via Ollama with chunked map-reduce.
+- Engine switch via env:
+  - VC_SUMMARY_ENGINE=heuristic (default) or llm
+  - VC_OLLAMA_URL=http://127.0.0.1:11434
+  - VC_OLLAMA_MODEL=qwen2.5:3b-instruct-q4_0 (default)
+  - Optional tuning: VC_SUMMARY_CHUNK_SIZE, VC_SUMMARY_MAX_INPUT, VC_SUMMARY_TIMEOUT_MS
+- Health endpoint: GET /api/summarizer/health returns {engine, ok, server?, model?, hasModel?}.
+- Frontend renders structured fields (files/tests/errors/duration) along with bullets.
+- UX polish: debounced summary updates + per-WS aggregate buffer to reduce flicker; live summarization status via summaryStatus events with a compact spinner (web/native) that avoids layout jumps.
+
+Quickstart (local):
+- Install Ollama (macOS): brew install ollama
+- Pull a model: ollama pull qwen2.5:3b-instruct-q4_0
+- Start backend with env:
+  - VC_SUMMARY_ENGINE=llm
+  - VC_OLLAMA_MODEL=qwen2.5:3b-instruct-q4_0
+  - (optional) VC_DEBUG=1
+
 
 [ ] Phase 6 — On-demand expansion (slices)
 - Goal: Keep bandwidth tiny; fetch details only when asked.

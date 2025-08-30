@@ -131,8 +131,30 @@ export default function HomeScreen() {
   const [showPty, setShowPty] = useState(false);
   const [ptyOutput, setPtyOutput] = useState("");
   const [summaryBullets, setSummaryBullets] = useState<string[]>([]);
+  const [summaryObj, setSummaryObj] = useState<null | {
+    version?: string;
+    bullets?: string[];
+    filesChanged?: { path: string; adds?: number; dels?: number }[];
+    tests?: {
+      passed?: number;
+      failed?: number;
+      failures?: { name?: string; message?: string }[];
+    };
+    errors?: { type?: string; message?: string }[];
+    actions?: string[];
+    metrics?: { durationMs?: number; commandsRun?: number; exitCode?: number };
+  }>(null);
   const [wsStatus, setWsStatus] = useState("disconnected");
   const [wsLastEvent, setWsLastEvent] = useState("");
+  const [health, setHealth] = useState<null | {
+    engine?: string;
+    ok?: boolean;
+    server?: boolean;
+    model?: string;
+    hasModel?: boolean;
+    error?: string;
+  }>(null);
+  const [isSummarizing, setIsSummarizing] = useState(false);
   // Phase 4: Approvals modal state
   const [pendingAction, setPendingAction] = useState<null | {
     actionId: string;
@@ -186,6 +208,18 @@ export default function HomeScreen() {
           try {
             socket.send(JSON.stringify({ type: "hello" }));
           } catch {}
+          // Fetch summarizer health on open
+          try {
+            const base = getHTTPBase();
+            if (base) {
+              fetch(`${base}/api/summarizer/health`)
+                .then((r) => r.json())
+                .then((j) => setHealth(j))
+                .catch(() => setHealth({ ok: false }));
+            }
+          } catch {
+            setHealth({ ok: false });
+          }
           if (pendingStartRef.current) {
             try {
               socket.send(
@@ -195,7 +229,6 @@ export default function HomeScreen() {
             pendingStartRef.current = false;
           }
         };
-        // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: centralized message router for clarity
         socket.onmessage = (event: MessageEvent) => {
           if (!alive) return;
           try {
@@ -211,6 +244,9 @@ export default function HomeScreen() {
             switch (type) {
               case "ack":
                 setStatus("waiting");
+                break;
+              case "summaryStatus":
+                setIsSummarizing(Boolean(rawObj.running));
                 break;
               case "reply":
                 setStatus("done");
@@ -238,14 +274,26 @@ export default function HomeScreen() {
               }
               case "summaryUpdate": {
                 const s = rawObj.summary;
-                let arr: unknown[] = [];
                 if (s && typeof s === "object") {
+                  setSummaryObj(s as typeof summaryObj);
                   const bullets = (s as Record<string, unknown>).bullets;
-                  if (Array.isArray(bullets)) arr = bullets as unknown[];
+                  const arr = Array.isArray(bullets)
+                    ? (bullets as unknown[])
+                    : [];
+                  setSummaryBullets(
+                    toStringArray(arr).filter((v) => v.length > 0)
+                  );
+                } else {
+                  setSummaryObj(null);
+                  const summaryMaybe = (rawObj as Record<string, unknown>)
+                    .summary as { bullets?: unknown[] } | undefined;
+                  const arr = Array.isArray(summaryMaybe?.bullets)
+                    ? summaryMaybe?.bullets || []
+                    : [];
+                  setSummaryBullets(
+                    toStringArray(arr).filter((v) => v.length > 0)
+                  );
                 }
-                setSummaryBullets(
-                  toStringArray(arr).filter((s) => s.length > 0)
-                );
                 break;
               }
               case "sessionExit":
@@ -540,6 +588,9 @@ export default function HomeScreen() {
             wsStatus={wsStatus}
             wsLastEvent={wsLastEvent}
             summaryBullets={summaryBullets}
+            summaryObj={summaryObj}
+            health={health}
+            isSummarizing={isSummarizing}
             output={ptyOutput}
             onToggleShow={() => setShowPty((v) => !v)}
             onStart={() => {

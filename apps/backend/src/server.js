@@ -8,7 +8,12 @@ import {
   describeConfig,
 } from "./runner.js";
 import * as pty from "./ptySession.js";
-import { summarizeIfChanged } from "./summarizer.js";
+// Phase 5 engine switch: heuristic vs LLM
+import {
+  summarizeIfChanged,
+  summarizerHealth,
+  summarizerEngine,
+} from "./summarizer_engine.js";
 import { execSync } from "child_process";
 const DEBUG =
   String(process.env.VC_DEBUG || "").toLowerCase() === "true" ||
@@ -38,6 +43,22 @@ dbg("startup: pty availability", {
 dbg("startup: SSH_AUTH_SOCK", process.env.SSH_AUTH_SOCK || null);
 app.use(cors());
 app.use(express.json());
+
+// Phase 5: summarizer health endpoint
+app.get("/api/summarizer/health", async (_req, res) => {
+  try {
+    const h = await summarizerHealth();
+    const engine = summarizerEngine();
+    console.log("[vc] summarizer.health", { engine, h });
+    res.json({ engine, ...h });
+  } catch (e) {
+    res.status(500).json({
+      engine: summarizerEngine(),
+      ok: false,
+      error: String(e?.message || e),
+    });
+  }
+});
 
 // --- Phase 4: Approvals and safe actions (config + helpers) ---
 const APPROVAL_ALWAYS =
@@ -173,9 +194,41 @@ function send(ws, obj) {
   } catch {}
 }
 
-function handleStartSession(ws, msg) {
+// Debounced summary scheduler to coalesce rapid output bursts
+function scheduleSummary(ws) {
+  try {
+    if (ws._summaryTimer) clearTimeout(ws._summaryTimer);
+    if (!ws._summaryInFlight) {
+      ws._summaryInFlight = true;
+      try {
+        send(ws, { type: "summaryStatus", running: true });
+      } catch {}
+    }
+    ws._summaryTimer = setTimeout(async () => {
+      try {
+        // Use PTY buffer if a PTY session is active; otherwise use the per-WS aggregate from streaming runs
+        const buf = pty.isRunning() ? pty.getBuffer() : ws._agg || "";
+        const s = await summarizeIfChanged(buf || "", ws._summaryHash || null);
+        if (s.changed && s.summary) {
+          ws._summaryHash = s.hash;
+          send(ws, { type: "summaryUpdate", summary: s.summary });
+        }
+      } catch {
+      } finally {
+        ws._summaryInFlight = false;
+        try {
+          send(ws, { type: "summaryStatus", running: false });
+        } catch {}
+      }
+    }, 500);
+  } catch {}
+}
+
+async function handleStartSession(ws, msg) {
   try {
     const r = pty.start(msg.options || {});
+    // PTY sessions stream through the PTY buffer; clear any leftover non-PTY aggregate
+    ws._agg = "";
     send(ws, {
       type: "sessionStarted",
       ok: !!r?.ok,
@@ -185,27 +238,13 @@ function handleStartSession(ws, msg) {
     const existing = pty.getBuffer();
     if (existing) send(ws, { type: "output", data: existing });
     // Send initial summary of existing buffer
-    try {
-      const s = summarizeIfChanged(existing || "", ws._summaryHash || null);
-      if (s.changed && s.summary) {
-        ws._summaryHash = s.hash;
-        send(ws, { type: "summaryUpdate", summary: s.summary });
-      }
-    } catch {}
+    scheduleSummary(ws, "init");
     // Prevent duplicate listeners: only add if not already added for this ws
     if (!ws._ptyListenersAdded) {
       ws._ptyListenersAdded = true;
-      const offData = pty.onOutput((chunk) => {
+      const offData = pty.onOutput(async (chunk) => {
         send(ws, { type: "output", data: chunk });
-        // Throttle by content-hash to avoid spamming
-        try {
-          const buf = pty.getBuffer();
-          const s = summarizeIfChanged(buf || "", ws._summaryHash || null);
-          if (s.changed && s.summary) {
-            ws._summaryHash = s.hash;
-            send(ws, { type: "summaryUpdate", summary: s.summary });
-          }
-        } catch {}
+        scheduleSummary(ws, "pty");
       });
       const offExit = pty.onExit((info) =>
         send(ws, { type: "sessionExit", info })
@@ -213,6 +252,10 @@ function handleStartSession(ws, msg) {
       ws.once("close", () => {
         offData();
         offExit();
+        try {
+          if (ws._summaryTimer) clearTimeout(ws._summaryTimer);
+        } catch {}
+        ws._summaryInFlight = false;
       });
     }
   } catch (err) {
@@ -261,20 +304,15 @@ async function handlePrompt(ws, msg) {
     return;
   }
   try {
-    let aggregate = "";
+    // Non-PTY streaming run: reset per-WS aggregate and build it from stdout chunks
+    ws._agg = "";
     const result = await runCommandPerRequestStream(msg.text, {
-      onStdoutChunk: (chunk) => {
-        aggregate += chunk;
+      onStdoutChunk: async (chunk) => {
+        ws._agg += String(chunk || "");
         // Stream to client as replyChunk when not using PTY
         send(ws, { type: "replyChunk", id: msg.id, data: chunk });
-        // Opportunistic summary update based on aggregated text
-        try {
-          const s = summarizeIfChanged(aggregate, ws._summaryHash || null);
-          if (s.changed && s.summary) {
-            ws._summaryHash = s.hash;
-            send(ws, { type: "summaryUpdate", summary: s.summary });
-          }
-        } catch {}
+        // Debounced summary on new output
+        scheduleSummary(ws);
       },
       onStderrChunk: (chunk) => {
         // For visibility, also stream stderr chunks
@@ -284,14 +322,8 @@ async function handlePrompt(ws, msg) {
     if (result.ok) {
       dbg("ws: ok", { id: msg.id, bytes: result.text?.length || 0 });
       send(ws, { type: "reply", id: msg.id, text: result.text });
-      // Final summary for any last bits not captured by hash change
-      try {
-        const s = summarizeIfChanged(aggregate, ws._summaryHash || null);
-        if (s.changed && s.summary) {
-          ws._summaryHash = s.hash;
-          send(ws, { type: "summaryUpdate", summary: s.summary });
-        }
-      } catch {}
+      // Kick one last summary after command ends
+      scheduleSummary(ws);
     } else {
       dbg("ws: error", {
         id: msg.id,
